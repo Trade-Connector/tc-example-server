@@ -65,6 +65,32 @@ describe("EventStore", () => {
     assert.equal(reopened.getSnapshot("sandbox", job.id)?.job.status, "SCHEDULED");
   });
 
+  it("keeps no ghost entry when the event-log write fails: TC's retry is the one recorded", async () => {
+    const storeDir = path.join(dir, "event-write-fails");
+    const store = await EventStore.open(storeDir);
+    const seen: string[] = [];
+    store.onEvent((event) => seen.push(event.webhook_id ?? ""));
+    const job = sampleJob({ status: "ASSIGNED", updated_at: "2026-11-17T03:00:00.000Z" });
+    const delivery = { environment: "sandbox" as const, webhookId: "evt_ghost", ...envelope("evt_ghost", "job.assigned", job) };
+
+    const eventsFile = path.join(storeDir, "webhook-events.json");
+    await mkdir(eventsFile, { recursive: true });
+    await assert.rejects(store.recordVerified(delivery));
+    await rm(eventsFile, { recursive: true });
+    assert.equal(store.listEvents().filter((e) => e.webhook_id === "evt_ghost").length, 0);
+    assert.deepEqual(seen, []);
+
+    const retry = await store.recordVerified(delivery);
+    assert.equal(retry.flags.duplicate, false);
+    assert.equal(store.listEvents().filter((e) => e.webhook_id === "evt_ghost").length, 1);
+    assert.deepEqual(seen, ["evt_ghost"]);
+
+    await flushJsonWrites();
+    const reopened = await EventStore.open(storeDir);
+    assert.equal(reopened.listEvents().filter((e) => e.webhook_id === "evt_ghost").length, 1);
+    assert.equal(reopened.getSnapshot("sandbox", job.id)?.job.status, "ASSIGNED");
+  });
+
   it("does not let an older job overwrite a newer one (unordered delivery)", async () => {
     const store = await EventStore.open(path.join(dir, "order"));
     const newer = sampleJob({ status: "SCHEDULED", updated_at: "2026-11-17T05:00:00.000Z" });

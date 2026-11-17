@@ -336,11 +336,22 @@ export class EventStore {
     if (this.#seen.size > MAX_SEEN_IDS) {
       this.#seen = new Set([...this.#seen].slice(-MAX_SEEN_IDS));
     }
+    try {
+      await writeJsonFile(this.#eventsFile, {
+        next_seq: this.#nextSeq,
+        events: this.#events,
+        seen_ids: [...this.#seen],
+      } satisfies PersistedEvents);
+    } catch (error) {
+      // The caller answers 500 and TC retries this delivery, so don't keep (or show) this attempt:
+      // the retry records it. (A write for another delivery that runs in between may still have
+      // saved it; the retry then shows as a second, non-duplicate entry. That is harmless here, and a
+      // database transaction avoids it in a real system.)
+      const index = this.#events.indexOf(event);
+      if (index !== -1) this.#events.splice(index, 1);
+      throw error;
+    }
+    // Tell the console only once the event has been written.
     this.#notify(event);
-    await writeJsonFile(this.#eventsFile, {
-      next_seq: this.#nextSeq,
-      events: this.#events,
-      seen_ids: [...this.#seen],
-    } satisfies PersistedEvents);
   }
 }
