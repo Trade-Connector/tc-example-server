@@ -83,8 +83,8 @@ paid, need no payment method, and always cancel free.
 | Idempotency | Send an `Idempotency-Key` header (1 to 255 characters) on `POST /v1/jobs`. Keys are kept for 24 hours, per API key. The same key with the same body returns the original job with `200`, the header `Idempotent-Replayed: true` and `"replayed": true`. The same key with a different body returns `422 IDEMPOTENCY_KEY_REUSED`. |
 | External reference | Your own job number. Unique per environment: a duplicate returns `409 DUPLICATE_EXTERNAL_REFERENCE` with `details.job_id` set to the existing job. It cannot be changed once set. |
 | Rate limit | 120 requests per minute per key by default (a fixed 60-second window). Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset` (Unix seconds). A `429` adds `Retry-After` (seconds). The limit is checked before the request runs, so retrying after the wait is always safe. |
-| Pagination | Keyset. `limit` 1 to 100 (default 20). The response is `{ "data": [...], "has_more": true, "next_cursor": "..." }`, newest change first (by `updated_at`). Pass `next_cursor` back as `cursor`; it contains a `|`, so URL-encode it. |
-| Syncing | Poll `GET /v1/jobs?updated_since=<ISO 8601>` (inclusive) and page through. |
+| Pagination | Keyset. `limit` 1 to 100 (default 20). The response is `{ "data": [...], "has_more": true, "next_cursor": "..." }`. Pass `next_cursor` back unchanged as `cursor`, URL-encoded (a jobs cursor contains a `\|`). Jobs come newest change first (by `updated_at`); installs are ordered differently (see [Installs](#installs-manufacturers)). |
+| Syncing | Poll `GET /v1/jobs?updated_since=<ISO 8601>` (inclusive) and page through to the end. See [Keeping in sync by polling](#keeping-in-sync-by-polling) for what to send next time. |
 | Money | Integer cents, Australian dollars. GST is 10%. |
 | Times | Timestamps are ISO 8601 in UTC. Schedule dates are plain `YYYY-MM-DD`. `time_window` is site local time with no time zone. |
 | Request id | Every response has an `X-Request-Id` header (and errors repeat it as `error.request_id`). Quote it to TC support. |
@@ -191,6 +191,21 @@ Every job route returns it, and every webhook carries it as `data.job`.
 
 The list takes `status` (one, or several comma-separated), `external_reference`, `updated_since` (ISO 8601,
 inclusive), `cursor` and `limit`. Unknown query parameters are refused.
+
+### Keeping in sync by polling
+
+Webhooks are the main way to hear about changes. If you also poll (to catch up after downtime, or instead of
+webhooks), do this:
+
+1. Page through `GET /v1/jobs?updated_since=<value>` until `has_more` is false.
+2. For the next poll, take the **largest `updated_at` among the jobs you received**, not your own clock, and go
+   back a margin, such as one minute. TC stamps `updated_at` when a change starts saving, so a change still being
+   saved while you polled can appear later with an earlier time; the margin catches it. If nothing came back, keep
+   the previous value.
+3. `updated_since` is inclusive and the margin overlaps, so some jobs come back again. Skip a job whose
+   `updated_at` is not newer than the copy you hold, comparing the full timestamp (TC's has microseconds).
+
+Store the value with your own data, so a restart carries on where it stopped.
 
 ### Update: `PATCH /v1/jobs/{id}` (`jobs:write`)
 
@@ -483,7 +498,7 @@ key (a test key gets `403 SCOPE_FORBIDDEN`), and the company must be a manufactu
 | Route | Scope | Does |
 | --- | --- | --- |
 | `POST /v1/installs` | `installs:write` | Creates (`201`) or updates (`200`) the registration for a `serial_number`, with optional `model`, `installed_on`, `shipped_on`, installer, site and homeowner fields and `external_reference` |
-| `GET /v1/installs` | `installs:read` | Lists registrations; filters `serial`, `status` (comma-separated: `REGISTERED`, `PENDING_VERIFICATION`, `VERIFIED`, `REJECTED`, `REPLACED`), `updated_since`, `cursor`, `limit`; same keyset pagination as jobs |
+| `GET /v1/installs` | `installs:read` | Lists registrations; filters `serial`, `status` (comma-separated: `REGISTERED`, `PENDING_VERIFICATION`, `VERIFIED`, `REJECTED`, `REPLACED`), `updated_since`, `cursor`, `limit`. Same response shape as jobs (`data`, `has_more`, `next_cursor`), but ordered by when each registration was **created**, newest first, with a different cursor format: treat `next_cursor` as opaque and pass it back unchanged. `updated_since` still filters on `updated_at`. |
 | `GET /v1/installs/{serial}` | `installs:read` | One registration, with its computed warranty `coverage` |
 
 ## Request log
