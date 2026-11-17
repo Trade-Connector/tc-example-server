@@ -115,9 +115,13 @@ function requireKey(ctx: ConsoleContext, call: TcCall): void {
   }
 }
 
-/** Live writes go through the guard; sandbox writes pass straight through. */
-function authorize(ctx: ConsoleContext, req: ApiRequest, action: LiveAction, target: string): void {
-  ctx.guard.authorizeWrite({ action, target, body: req.body, token: req.liveToken });
+/**
+ * Every write goes through the guard, with the environment this call's TC client was built for
+ * (never the console's mode, read again later): live needs a matching confirmation token, and a
+ * call whose environment no longer matches the console's mode is refused.
+ */
+function authorize(ctx: ConsoleContext, req: ApiRequest, call: TcCall, action: LiveAction, target: string): void {
+  ctx.guard.authorizeWrite({ environment: call.environment, action, target, body: req.body, token: req.liveToken });
 }
 
 function sandboxOnly(call: TcCall): void {
@@ -228,7 +232,7 @@ route("POST", /^\/api\/jobs$/, async (ctx, req, tc) => {
   const call = tc();
   requireKey(ctx, call);
   const job = requireObject(req.body.job, "job") as unknown as CreateJobRequest;
-  authorize(ctx, req, "create_job", "");
+  authorize(ctx, req, call, "create_job", "");
   const idempotencyKey = str(req.body.idempotency_key);
   return call.client.createJob(job, idempotencyKey ? { idempotencyKey } : {});
 });
@@ -243,14 +247,14 @@ route("PATCH", /^\/api\/jobs\/([^/]+)$/, async (ctx, req, tc) => {
   const call = tc();
   requireKey(ctx, call);
   const patch = requireObject(req.body.patch, "patch") as UpdateJobRequest;
-  authorize(ctx, req, "update_job", req.params[0]!);
+  authorize(ctx, req, call, "update_job", req.params[0]!);
   return call.client.updateJob(req.params[0]!, patch);
 });
 
 route("POST", /^\/api\/jobs\/([^/]+)\/publish$/, async (ctx, req, tc) => {
   const call = tc();
   requireKey(ctx, call);
-  authorize(ctx, req, "publish_job", req.params[0]!);
+  authorize(ctx, req, call, "publish_job", req.params[0]!);
   return call.client.publishJob(req.params[0]!);
 });
 
@@ -259,7 +263,7 @@ route("POST", /^\/api\/jobs\/([^/]+)\/notes$/, async (ctx, req, tc) => {
   requireKey(ctx, call);
   const body = str(req.body.body);
   if (!body) throw new ConsoleError(400, "BAD_REQUEST", "body (the note text) is required");
-  authorize(ctx, req, "add_note", req.params[0]!);
+  authorize(ctx, req, call, "add_note", req.params[0]!);
   return call.client.addNote(req.params[0]!, body);
 });
 
@@ -282,7 +286,7 @@ route(
     if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) {
       throw new ConsoleError(400, "BAD_REQUEST", "Files must be between 1 byte and 25 MB");
     }
-    authorize(ctx, req, "upload_attachment", req.params[0]!);
+    authorize(ctx, req, call, "upload_attachment", req.params[0]!);
     const category = str(req.body.category) as AttachmentCategory | undefined;
     const title = str(req.body.title);
     return call.client.uploadAttachment(req.params[0]!, {
@@ -299,7 +303,7 @@ route(
 route("POST", /^\/api\/jobs\/([^/]+)\/cancel$/, async (ctx, req, tc) => {
   const call = tc();
   requireKey(ctx, call);
-  authorize(ctx, req, "cancel_job", req.params[0]!);
+  authorize(ctx, req, call, "cancel_job", req.params[0]!);
   return call.client.cancelJob(req.params[0]!, str(req.body.reason));
 });
 
@@ -339,7 +343,7 @@ route("POST", /^\/api\/installs$/, async (ctx, req, tc) => {
   liveOnly(call);
   requireKey(ctx, call);
   const install = requireObject(req.body.install, "install") as unknown as UpsertInstallRequest;
-  authorize(ctx, req, "upsert_install", "");
+  authorize(ctx, req, call, "upsert_install", "");
   return call.client.upsertInstall(install);
 });
 
