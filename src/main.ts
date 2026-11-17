@@ -4,8 +4,11 @@ import { randomBytes } from "node:crypto";
 import type { Server } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { storeEventSource } from "./check/event-source.ts";
+import { RetryProbe } from "./check/retry-probe.ts";
 import { ConfigError, loadConfig, loadDotEnv, type Config } from "./config.ts";
 import { keyPrefix, log, registerSecret, setLogLevel } from "./log.ts";
+import { CheckManager } from "./server/check-manager.ts";
 import { createConsoleServer } from "./server/console-server.ts";
 import { urlHostFor } from "./server/http-util.ts";
 import { Coverage } from "./server/coverage.ts";
@@ -77,17 +80,28 @@ async function main(): Promise<void> {
   });
 
   const token = randomBytes(24).toString("base64url");
-  const webhookServer = createWebhookServer({ config, store });
+  // The sandbox check's one-shot retry switch, shared by the listener and the check.
+  const retryProbe = new RetryProbe();
+  const webhookServer = createWebhookServer({ config, store, retryProbe });
+  const webhookPort = await listen(webhookServer, config.webhookPort, config.webhookHost);
+
+  const checks = new CheckManager({
+    config,
+    store,
+    events: storeEventSource(store),
+    coverage,
+    retryProbe,
+    listenerUrl: `http://${urlHostFor(config.webhookHost)}:${webhookPort}${WEBHOOK_PATHS.sandbox}`,
+  });
   const consoleServer = createConsoleServer({
     config,
     guard,
     store,
     coverage,
+    checks,
     token,
     publicDir,
   });
-
-  const webhookPort = await listen(webhookServer, config.webhookPort, config.webhookHost);
   const consolePort = await listen(consoleServer, config.consolePort, config.consoleHost);
   const consoleUrl = `http://${urlHostFor(config.consoleHost)}:${consolePort}/#token=${token}`;
   process.stdout.write(banner(config, consoleUrl, webhookPort) + "\n");

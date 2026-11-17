@@ -380,6 +380,12 @@ export interface Accreditation {
   issuing_body: string | null;
   type: string | null;
   scope: string | null;
+  /**
+   * The trade types (codes from /v1/reference/trade-types) this accreditation applies to. TC is
+   * adding this within v1 and it is not sent yet, so treat it as optional: when it is absent,
+   * offer every accreditation.
+   */
+  trade_type_codes?: string[];
 }
 
 // ---------------------------------------------------------------------------------------------
