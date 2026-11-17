@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { setLogSink } from "../src/log.ts";
 import { flushJsonWrites } from "../src/store/json-file.ts";
 import type { WebhookEnvelope } from "../src/webhooks/events.ts";
-import { EventStore } from "../src/webhooks/store.ts";
+import { EventStore, MAX_REJECTED_DELIVERIES, preciseInstant } from "../src/webhooks/store.ts";
 import { sampleJob, tcEnvelope } from "./helpers/tc-signer.ts";
 
 let dir: string;
@@ -61,6 +61,26 @@ describe("EventStore", () => {
     assert.equal(store.getSnapshot("sandbox", newer.id)?.job.status, "IN_PROGRESS");
   });
 
+  it("orders two updates in the same millisecond by their microseconds", async () => {
+    const store = await EventStore.open(path.join(dir, "micro"));
+    // TC's updated_at carries microseconds. Both of these are .123 at millisecond precision.
+    const newer = sampleJob({ status: "SCHEDULED", updated_at: "2026-11-17T01:00:00.123456+00:00" });
+    const older = sampleJob({ status: "ASSIGNED", updated_at: "2026-11-17T01:00:00.123123+00:00" });
+    await store.recordVerified({ environment: "sandbox", webhookId: "evt_us_new", ...envelope("evt_us_new", "job.status_changed", newer) });
+    const late = await store.recordVerified({ environment: "sandbox", webhookId: "evt_us_old", ...envelope("evt_us_old", "job.status_changed", older) });
+    assert.equal(late.flags.out_of_order, true);
+    assert.equal(store.getSnapshot("sandbox", newer.id)?.job.status, "SCHEDULED");
+  });
+
+  it("reads timestamps at full precision, in any offset", () => {
+    assert.equal(preciseInstant("2026-11-17T01:00:00Z"), BigInt(Date.parse("2026-11-17T01:00:00Z")) * 1_000_000n);
+    assert.equal(preciseInstant("2026-11-17T01:00:00.000001Z")! - preciseInstant("2026-11-17T01:00:00Z")!, 1000n);
+    assert.equal(preciseInstant("2026-11-17T11:00:00.5+10:00"), preciseInstant("2026-11-17T01:00:00.500000Z"));
+    assert.ok(preciseInstant("2026-11-17T01:00:00.123456+00:00")! > preciseInstant("2026-11-17T01:00:00.123455+00:00")!);
+    assert.equal(preciseInstant("not a time"), null);
+    assert.equal(preciseInstant(null), null);
+  });
+
   it("keeps sandbox and live snapshots apart, and dedupes per path", async () => {
     const store = await EventStore.open(path.join(dir, "envs"));
     const job = sampleJob({ is_sandbox: false });
@@ -73,9 +93,24 @@ describe("EventStore", () => {
 
   it("flags (does not drop) a job whose is_sandbox disagrees with the path", async () => {
     const store = await EventStore.open(path.join(dir, "mismatch"));
-    const event = await store.recordVerified({ environment: "live", webhookId: "evt_m", ...envelope("evt_m", "job.created", sampleJob({ is_sandbox: true })) });
+    const job = sampleJob({ is_sandbox: true });
+    const event = await store.recordVerified({ environment: "live", webhookId: "evt_m", ...envelope("evt_m", "job.created", job) });
     assert.equal(event.flags.environment_mismatch, true);
     assert.equal(store.listEvents()[0]?.webhook_id, "evt_m");
+    // Stored, not processed: it never becomes the live snapshot of the job.
+    assert.equal(store.getSnapshot("live", job.id), null);
+    assert.ok(warnings.some((w) => w.includes("is_sandbox does not match") && w.includes("not processed")));
+  });
+
+  it("stores an unknown event type without processing it (no snapshot change)", async () => {
+    const store = await EventStore.open(path.join(dir, "unknown-type"));
+    const job = sampleJob({ status: "OPEN", updated_at: "2026-11-17T01:00:00Z" });
+    await store.recordVerified({ environment: "sandbox", webhookId: "evt_k1", ...envelope("evt_k1", "job.created", job) });
+    const newer = sampleJob({ status: "ASSIGNED", updated_at: "2026-11-17T02:00:00Z" });
+    const odd = await store.recordVerified({ environment: "sandbox", webhookId: "evt_k2", ...envelope("evt_k2", "job.teleported", newer) });
+    assert.equal(odd.flags.unknown_type, true);
+    assert.equal(odd.job_status, "ASSIGNED", "stored as received");
+    assert.equal(store.getSnapshot("sandbox", job.id)?.job.status, "OPEN", "not processed");
   });
 
   it("stores unknown event types and unknown statuses, flagged, without crashing", async () => {
@@ -116,8 +151,30 @@ describe("EventStore", () => {
     assert.ok(reopened.getSnapshot("sandbox", job.id));
     const repeat = await reopened.recordVerified({ environment: "sandbox", webhookId: "evt_p1", ...envelope("evt_p1", "job.created", job) });
     assert.equal(repeat.flags.duplicate, true);
-    const file = await readFile(path.join(sub, "webhook-events.json"), "utf8");
-    assert.ok(file.includes("evt_bad"));
+    assert.ok((await readFile(path.join(sub, "webhook-rejections.json"), "utf8")).includes("evt_bad"));
+    assert.ok(!(await readFile(path.join(sub, "webhook-events.json"), "utf8")).includes("evt_bad"));
+    // Sequence numbers carry on after a restart, across both logs.
+    const next = await reopened.recordRejected({ environment: "sandbox", webhookId: "evt_bad2", reason: "no_matching_signature", message: "x" });
+    assert.ok(next.seq > Math.max(...reopened.listEvents().filter((e) => e !== next).map((e) => e.seq)));
+  });
+
+  it("keeps refused deliveries in their own small log, so junk cannot push real events out", async () => {
+    const sub = path.join(dir, "flood");
+    const store = await EventStore.open(sub);
+    const real = await store.recordVerified({ environment: "sandbox", webhookId: "evt_real", ...envelope("evt_real", "job.created", sampleJob()) });
+    const junk = MAX_REJECTED_DELIVERIES + 50;
+    await Promise.all(Array.from({ length: junk }, (_, n) => store.recordRejected({ environment: "sandbox", webhookId: `junk_${n}`, reason: "missing_headers", message: "x" })));
+    await flushJsonWrites();
+
+    const all = store.listEvents({ limit: 5000 });
+    assert.equal(all.filter((e) => !e.verified).length, MAX_REJECTED_DELIVERIES, "refusals are capped");
+    assert.equal(all[0]!.webhook_id, `junk_${junk - 1}`, "newest first, across both logs");
+    assert.ok(all.some((e) => e.webhook_id === "evt_real"), "the real event is still listed");
+    assert.deepEqual(store.listEvents({ afterSeq: real.seq - 1, limit: 5000 }).at(-1)?.webhook_id, "evt_real");
+
+    const eventsFile = await readFile(path.join(sub, "webhook-events.json"), "utf8");
+    assert.ok(eventsFile.includes("evt_real"));
+    assert.ok(!eventsFile.includes("junk_"), "refusals never touch the event log");
   });
 
   it("lists newest first, filters by job and polls after a sequence number", async () => {

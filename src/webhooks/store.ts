@@ -5,9 +5,15 @@
 //    from TC's Deliveries tab carries the same id. A duplicate is recorded (so you can see it)
 //    but never processed again.
 // 2. Never let an older job overwrite a newer one: compare data.job.updated_at with what you
-//    already hold, and keep the newer.
+//    already hold, and keep the newer. TC's timestamps carry microseconds, and two changes can
+//    fall in the same millisecond, so compare at full precision (not with Date.parse).
 //
-// Unknown event types and unknown job statuses are stored and flagged, never dropped.
+// Nothing is dropped. Unknown event types, and jobs whose is_sandbox disagrees with the path they
+// arrived on, are stored and flagged but not processed: they never change a job snapshot.
+// Unknown job statuses are stored and processed as they are.
+//
+// Refused deliveries (bad signature and so on) are kept apart, in a small log of their own, so
+// junk sent to the public webhook URL can never push real events out of the event log.
 //
 // A real system would use its database for this. A JSON file keeps the example readable.
 
@@ -25,8 +31,9 @@ export interface EventFlags {
   duplicate: boolean;
   /** data.job.updated_at is older than the snapshot already held: snapshot left alone. */
   out_of_order: boolean;
-  /** data.job.is_sandbox disagrees with the path it arrived on. */
+  /** data.job.is_sandbox disagrees with the path it arrived on: stored, not processed. */
   environment_mismatch: boolean;
+  /** An event type this example does not know: stored, not processed. */
   unknown_type: boolean;
   unknown_status: boolean;
   /** webhook.test: carries a dummy job, so it never touches snapshots. */
@@ -72,6 +79,8 @@ const NO_FLAGS: EventFlags = {
 };
 
 const MAX_EVENTS = 2000;
+/** Refused deliveries kept for the console. Small, so a flood of junk costs little to save. */
+export const MAX_REJECTED_DELIVERIES = 200;
 const MAX_SEEN_IDS = 20_000;
 
 interface PersistedEvents {
@@ -80,11 +89,34 @@ interface PersistedEvents {
   seen_ids: string[];
 }
 
+interface PersistedRejections {
+  next_seq: number;
+  rejections: StoredEvent[];
+}
+
+/**
+ * An ISO 8601 timestamp as nanoseconds since 1970, keeping every fractional digit (TC sends
+ * microseconds, e.g. "2026-11-17T01:00:00.123456+00:00"). Null when it cannot be parsed.
+ */
+export function preciseInstant(value: unknown): bigint | null {
+  if (typeof value !== "string") return null;
+  const match = /^(.+T\d{2}:\d{2}:\d{2})(?:[.,](\d+))?(.*)$/.exec(value.trim());
+  if (!match) return null;
+  const wholeSecondsMs = Date.parse(`${match[1]}${match[3]}`);
+  if (Number.isNaN(wholeSecondsMs)) return null;
+  const nanos = (match[2] ?? "").slice(0, 9).padEnd(9, "0");
+  return BigInt(wholeSecondsMs) * 1_000_000n + BigInt(nanos);
+}
+
 export class EventStore {
   readonly #eventsFile: string;
+  readonly #rejectionsFile: string;
   readonly #snapshotsFile: string;
   #nextSeq = 1;
+  /** Verified deliveries, oldest first. */
   #events: StoredEvent[] = [];
+  /** Refused deliveries, oldest first. Shares the seq counter with #events. */
+  #rejections: StoredEvent[] = [];
   /** `${environment}:${webhook-id}` of every processed delivery. */
   #seen = new Set<string>();
   #snapshots: Record<string, JobSnapshot> = {};
@@ -92,6 +124,7 @@ export class EventStore {
 
   private constructor(dataDir: string) {
     this.#eventsFile = path.join(dataDir, "webhook-events.json");
+    this.#rejectionsFile = path.join(dataDir, "webhook-rejections.json");
     this.#snapshotsFile = path.join(dataDir, "job-snapshots.json");
   }
 
@@ -102,8 +135,10 @@ export class EventStore {
       events: [],
       seen_ids: [],
     });
-    store.#nextSeq = persisted.next_seq;
+    const rejected = await readJsonFile<PersistedRejections>(store.#rejectionsFile, { next_seq: 1, rejections: [] });
+    store.#nextSeq = Math.max(persisted.next_seq, rejected.next_seq);
     store.#events = persisted.events;
+    store.#rejections = rejected.rejections;
     store.#seen = new Set(persisted.seen_ids);
     store.#snapshots = await readJsonFile<Record<string, JobSnapshot>>(store.#snapshotsFile, {});
     return store;
@@ -143,19 +178,25 @@ export class EventStore {
     }
 
     if (flags.unknown_type) log.warn("Webhook with an unknown event type: stored, not processed", { type, webhookId });
-    if (flags.unknown_status) log.warn("Webhook job has an unknown status: stored as is", { status: job?.status, webhookId });
+    if (flags.unknown_status) log.warn("Webhook job has an unknown status: stored and processed as is", { status: job?.status, webhookId });
     if (flags.environment_mismatch) {
-      log.warn("Webhook job.is_sandbox does not match the path it arrived on", {
+      log.warn("Webhook job.is_sandbox does not match the path it arrived on: stored, not processed", {
         path: environment,
         is_sandbox: job?.is_sandbox,
         webhookId,
       });
     }
 
+    // Processing = updating the job snapshot. Only for a first delivery of a known event type
+    // that carries a real job from the right environment.
+    let snapshotSaved: Promise<void> = Promise.resolve();
     if (!flags.duplicate) {
       this.#seen.add(seenKey);
-      if (job && !flags.test_event && typeof job.id === "string") {
-        flags.out_of_order = !this.#applySnapshot(environment, job, type ?? "unknown", webhookId);
+      const processable = !flags.unknown_type && !flags.environment_mismatch && !flags.test_event;
+      if (job && processable && typeof job.id === "string") {
+        const applied = this.#applySnapshot(environment, job, type ?? "unknown", webhookId);
+        flags.out_of_order = applied === null;
+        if (applied) snapshotSaved = applied;
       }
     }
 
@@ -178,11 +219,15 @@ export class EventStore {
       flags,
       raw_body: input.rawBody,
     };
-    await this.#append(event);
+    // Resolves once the event (and any snapshot change) is on disk.
+    await Promise.all([this.#append(event), snapshotSaved]);
     return event;
   }
 
-  /** Records a refused delivery (bad signature etc.). The body is NOT kept: it is untrusted. */
+  /**
+   * Records a refused delivery (bad signature etc.) in the separate, small rejection log. The body
+   * is NOT kept: it is untrusted.
+   */
   async recordRejected(input: {
     environment: ReceiveEnvironment;
     webhookId: string | null;
@@ -208,16 +253,29 @@ export class EventStore {
       flags: { ...NO_FLAGS },
       raw_body: null,
     };
-    await this.#append(event);
+    this.#rejections.push(event);
+    if (this.#rejections.length > MAX_REJECTED_DELIVERIES) {
+      this.#rejections.splice(0, this.#rejections.length - MAX_REJECTED_DELIVERIES);
+    }
+    this.#notify(event);
+    await writeJsonFile(this.#rejectionsFile, {
+      next_seq: this.#nextSeq,
+      rejections: this.#rejections,
+    } satisfies PersistedRejections);
     return event;
   }
 
-  /** Newest first. */
+  /** Verified and refused deliveries together, newest first (by seq). */
   listEvents(filter: { jobId?: string; afterSeq?: number; limit?: number } = {}): StoredEvent[] {
-    const limit = Math.min(Math.max(filter.limit ?? 200, 1), MAX_EVENTS);
+    const limit = Math.min(Math.max(filter.limit ?? 200, 1), MAX_EVENTS + MAX_REJECTED_DELIVERIES);
     const out: StoredEvent[] = [];
-    for (let i = this.#events.length - 1; i >= 0 && out.length < limit; i--) {
-      const event = this.#events[i]!;
+    let i = this.#events.length - 1;
+    let j = this.#rejections.length - 1;
+    while (out.length < limit && (i >= 0 || j >= 0)) {
+      const verified = this.#events[i];
+      const refused = this.#rejections[j];
+      // Both lists are in seq order: take the newer head of the two.
+      const event = !refused || (verified && verified.seq > refused.seq) ? this.#events[i--]! : this.#rejections[j--]!;
       if (filter.afterSeq !== undefined && event.seq <= filter.afterSeq) break;
       if (filter.jobId && event.job_id !== filter.jobId) continue;
       out.push(event);
@@ -230,17 +288,17 @@ export class EventStore {
   }
 
   /**
-   * Keeps the newer of the held snapshot and `job`. Returns false when `job` is older than
-   * what is held (an out-of-order delivery), true when it was stored or is the same age.
+   * Keeps the newer of the held snapshot and `job`. Returns null when `job` is older than what is
+   * held (an out-of-order delivery); otherwise stores it and returns the pending file write.
    */
-  #applySnapshot(environment: ReceiveEnvironment, job: Job, type: string, webhookId: string): boolean {
+  #applySnapshot(environment: ReceiveEnvironment, job: Job, type: string, webhookId: string): Promise<void> | null {
     const key = `${environment}:${job.id}`;
     const held = this.#snapshots[key];
     if (held) {
-      const heldMs = Date.parse(held.job.updated_at);
-      const incomingMs = Date.parse(job.updated_at);
-      if (!Number.isNaN(heldMs) && !Number.isNaN(incomingMs) && incomingMs < heldMs) {
-        return false;
+      const heldAt = preciseInstant(held.job.updated_at);
+      const incomingAt = preciseInstant(job.updated_at);
+      if (heldAt !== null && incomingAt !== null && incomingAt < heldAt) {
+        return null;
       }
     }
     this.#snapshots[key] = {
@@ -250,10 +308,17 @@ export class EventStore {
       last_webhook_id: webhookId,
       stored_at: new Date().toISOString(),
     };
-    void writeJsonFile(this.#snapshotsFile, this.#snapshots).catch((error: Error) =>
-      log.error("Could not save job snapshots", { error: error.message }),
-    );
-    return true;
+    return writeJsonFile(this.#snapshotsFile, this.#snapshots);
+  }
+
+  #notify(event: StoredEvent): void {
+    for (const listener of this.#listeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        log.error("Event listener failed", { error: (error as Error).message });
+      }
+    }
   }
 
   async #append(event: StoredEvent): Promise<void> {
@@ -262,13 +327,7 @@ export class EventStore {
     if (this.#seen.size > MAX_SEEN_IDS) {
       this.#seen = new Set([...this.#seen].slice(-MAX_SEEN_IDS));
     }
-    for (const listener of this.#listeners) {
-      try {
-        listener(event);
-      } catch (error) {
-        log.error("Event listener failed", { error: (error as Error).message });
-      }
-    }
+    this.#notify(event);
     await writeJsonFile(this.#eventsFile, {
       next_seq: this.#nextSeq,
       events: this.#events,
