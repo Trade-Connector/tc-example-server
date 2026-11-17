@@ -7,10 +7,12 @@
 // (TC endpoints are per environment, so each gets its own URL and secret.)
 //
 // Status codes matter to TC:
-//   2xx  delivered. Answer quickly (TC waits 10 seconds), then do the work.
+//   2xx  delivered: TC does not retry it. So store the event FIRST, then answer
+//        (TC waits 10 seconds), and do any slow work afterwards, from storage.
 //   401  bad signature. TC retries with backoff, and the delivery shows as failed in TC.
 //   410  NEVER send this: TC treats 410 Gone as "disable this endpoint" and stops all deliveries.
-//   other non-2xx: TC retries after 1 m, 5 m, 30 m, 2 h, 6 h, 12 h and 24 h.
+//   other non-2xx (500 when the event could not be stored): TC retries after 1 m, 5 m, 30 m,
+//        2 h, 6 h, 12 h and 24 h.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Config } from "../config.ts";
@@ -52,8 +54,10 @@ export function createWebhookServer(options: WebhookServerOptions): Server {
       sendText(res, 404, "Not found");
       return;
     }
+    // The one place an unexpected failure (including a failed store write) is answered: 500, so
+    // TC retries the delivery later. Never 410.
     handleDelivery(req, res, environment, keys[environment], options).catch((error: Error) => {
-      log.error("Webhook handler failed", { error: error.message });
+      log.error("Webhook handler failed; answered 500 so TC retries", { environment, error: error.message });
       if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
     });
   });
@@ -113,25 +117,20 @@ async function handleDelivery(
     return;
   }
 
-  // 3. Acknowledge at once, then do the work.
-  // In your own system, write the raw event to durable storage (a table or queue) BEFORE
-  // answering 2xx, then process it from there; a crash after the 2xx would otherwise lose it.
+  // 3. Store, THEN acknowledge. Once TC sees a 2xx it does not retry the delivery, so answering
+  //    before the event is written would lose it if the write failed or the process stopped in
+  //    between. A failed write throws to the handler's catch above, which answers 500.
+  //    The write is local and quick, well inside TC's 10-second timeout. In your own system, write
+  //    the raw event to durable storage (a table or queue) here, then process it from there.
+  const event = await options.store.recordVerified({ environment, webhookId: result.webhookId, envelope, rawBody: rawText });
   sendJson(res, 200, { received: true });
-
-  setImmediate(() => {
-    options.store
-      .recordVerified({ environment, webhookId: result.webhookId, envelope, rawBody: rawText })
-      .then((event) => {
-        log.info("Webhook received", {
-          environment,
-          type: event.event_type,
-          webhookId: event.webhook_id,
-          job: event.external_reference ?? event.job_id,
-          status: event.job_status,
-          duplicate: event.flags.duplicate || undefined,
-          out_of_order: event.flags.out_of_order || undefined,
-        });
-      })
-      .catch((error: Error) => log.error("Could not store webhook event", { error: error.message }));
+  log.info("Webhook received", {
+    environment,
+    type: event.event_type,
+    webhookId: event.webhook_id,
+    job: event.external_reference ?? event.job_id,
+    status: event.job_status,
+    duplicate: event.flags.duplicate || undefined,
+    out_of_order: event.flags.out_of_order || undefined,
   });
 }

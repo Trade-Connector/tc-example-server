@@ -408,8 +408,14 @@ if (!result.ok) {
   res.writeHead(401).end(); // never 410
   return;
 }
-res.writeHead(200).end(); // answer quickly…
-queueForProcessing(JSON.parse(rawBody.toString("utf8"))); // …then do the work
+try {
+  await saveEvent(result.webhookId, rawBody); // 1. store the raw event durably (a table or a queue)…
+} catch {
+  res.writeHead(500).end(); // TC retries a 5xx later; never answer 410
+  return;
+}
+res.writeHead(200).end(); // 2. …then answer: TC does not retry a delivery that got a 2xx
+processLater(result.webhookId); // 3. do the slow work from storage
 ```
 
 Without this repository, the core is a few lines of `node:crypto`:
@@ -435,7 +441,9 @@ function verify(rawBody, headers, secret) {
 ### Delivery and retries
 
 - Deliveries go out within about a minute, with a 10-second timeout.
-- **Any 2xx is success.** Answer quickly, then do the work. Ideally save the event to durable storage first.
+- **Any 2xx is success, and TC does not retry a delivery that got one.** So save the event to durable storage
+  first, then answer 2xx (well inside the 10-second timeout), then do the slower work from storage. If the save
+  fails, answer 5xx so TC retries.
 - Anything else is a failure and is retried after 1 minute, 5 minutes, 30 minutes, 2 hours, 6 hours, 12 hours and
   24 hours (8 attempts over about 45 hours).
 - **`410 Gone` disables the endpoint at once.** Never answer 410 unless you mean that. Use 401 for a bad

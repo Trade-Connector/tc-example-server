@@ -115,6 +115,14 @@ describe("webhook listener", () => {
     assert.equal(event.flags.environment_mismatch, true);
   });
 
+  it("has the event on disk by the time it answers 200", async () => {
+    const res = await deliver("/webhooks/tc/sandbox", "evt_durable");
+    assert.equal(res.status, 200);
+    // No flushJsonWrites(): the 200 itself must mean the write has finished.
+    const text = await readFile(path.join(dataDir, "webhook-events.json"), "utf8");
+    assert.ok(text.includes('"evt_durable"'));
+  });
+
   it("never answers 410, and never writes the secret to data/", async () => {
     assert.ok(statuses.length > 10);
     assert.ok(!statuses.includes(410));
@@ -123,5 +131,67 @@ describe("webhook listener", () => {
       const text = await readFile(path.join(dataDir, file), "utf8");
       assert.ok(!text.includes(TEST_SECRET.slice(6)), file);
     }
+  });
+});
+
+describe("webhook listener: storing before answering", () => {
+  // A store whose recordVerified() the test controls, to see exactly when the listener answers.
+  let stubServer: Server;
+  let stubPort: number;
+  let pending: { resolve: () => void; reject: (error: Error) => void } | null = null;
+  let calls = 0;
+  const stub = {
+    recordVerified: (input: { webhookId: string }) => {
+      calls++;
+      return new Promise((resolve, reject) => {
+        pending = {
+          resolve: () => resolve({ ...input, webhook_id: input.webhookId, event_type: "job.status_changed", flags: {} }),
+          reject,
+        };
+      });
+    },
+    recordRejected: async () => ({}),
+  } as unknown as EventStore;
+
+  before(async () => {
+    stubServer = createWebhookServer({ config: { test: { apiKey: null, webhookSecret: TEST_SECRET }, live: { apiKey: null, webhookSecret: null } }, store: stub });
+    stubPort = await listenLocal(stubServer);
+  });
+  after(async () => {
+    await closeServer(stubServer);
+  });
+
+  async function deliverToStub(eventId: string) {
+    const body = JSON.stringify(tcEnvelope({ eventId, type: "job.status_changed", job: sampleJob() }));
+    const headers = await tcHeaders({ webhookId: eventId, body, secret: TEST_SECRET });
+    let answered = false;
+    const response = send(stubPort, { method: "POST", path: "/webhooks/tc/sandbox", headers, body }).then((res) => {
+      answered = true;
+      statuses.push(res.status);
+      return res;
+    });
+    await eventually(() => pending !== null);
+    await new Promise((r) => setTimeout(r, 50));
+    return { response, answered: () => answered };
+  }
+
+  it("does not answer until the event is stored, then answers 200", async () => {
+    calls = 0;
+    pending = null;
+    const { response, answered } = await deliverToStub("evt_wait");
+    assert.equal(calls, 1);
+    assert.equal(answered(), false, "no answer while the store write is still running");
+    pending!.resolve();
+    assert.equal((await response).status, 200);
+  });
+
+  it("answers 500 (so TC retries, never 410) when the event cannot be stored", async () => {
+    pending = null;
+    const { response, answered } = await deliverToStub("evt_store_fails");
+    assert.equal(answered(), false);
+    pending!.reject(new Error("disk full"));
+    const res = await response;
+    assert.equal(res.status, 500);
+    assert.notEqual(res.status, 410);
   });
 });
