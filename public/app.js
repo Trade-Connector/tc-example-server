@@ -84,8 +84,9 @@ function statusBadge(status) {
   return h("span", { class: `badge status-${status}`, text: status ?? "?" });
 }
 
+/** env is "sandbox" or "live". */
 function envBadge(env) {
-  return h("span", { class: `badge ${env === "live" || env === false ? "live" : "sandbox"}`, text: env === "live" || env === false ? "LIVE" : "sandbox" });
+  return env === "live" ? h("span", { class: "badge live", text: "LIVE" }) : h("span", { class: "badge sandbox", text: "sandbox" });
 }
 
 function pre(value) {
