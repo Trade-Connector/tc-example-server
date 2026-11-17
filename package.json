@@ -1,0 +1,21 @@
+{
+  "name": "tc-example-server",
+  "version": "0.1.0",
+  "description": "Example integration with the Trade Connector Partner API v1: API client, test console and verified webhooks.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning src/main.ts",
+    "demo": "node --disable-warning=ExperimentalWarning src/demo.ts",
+    "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "typescript": "^7.0.2"
+  }
+}

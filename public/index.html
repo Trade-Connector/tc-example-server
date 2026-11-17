@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TC example console</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="live-banner" class="live-banner" hidden>
+    LIVE MODE: real jobs reach real installers, and cancelling can cost money. Every write asks you to type LIVE.
+  </div>
+
+  <header class="topbar">
+    <div class="brand">Trade Connector <span>example console</span></div>
+    <div class="env-switch" role="group" aria-label="Environment">
+      <button type="button" id="env-sandbox" class="env-btn">Sandbox</button>
+      <button type="button" id="env-live" class="env-btn">Live</button>
+    </div>
+    <dl class="facts">
+      <div><dt>Key</dt><dd id="fact-key">…</dd></div>
+      <div><dt>Base URL</dt><dd id="fact-base" class="mono">…</dd></div>
+      <div><dt>Health</dt><dd><span id="fact-health" class="muted">not checked</span> <button type="button" id="health-btn" class="small">Check</button></dd></div>
+    </dl>
+  </header>
+
+  <div class="subbar">
+    <details id="webhook-urls">
+      <summary>Webhook URLs to paste into TC</summary>
+      <div class="webhook-help">
+        <p>Expose <strong>only</strong> the webhook port with a tunnel, for example
+          <code id="tunnel-cmd">cloudflared tunnel --url http://127.0.0.1:3001</code>, then add these as endpoints in the
+          TC web app (Settings → API &amp; Webhooks → Webhooks). Put each endpoint's <code>whsec_…</code> secret in <code>.env</code>.</p>
+        <table class="kv">
+          <tr><th>Sandbox endpoint</th><td class="mono" id="wh-sandbox"></td><td id="wh-sandbox-secret"></td></tr>
+          <tr><th>Live endpoint</th><td class="mono" id="wh-live"></td><td id="wh-live-secret"></td></tr>
+        </table>
+      </div>
+    </details>
+    <span id="live-reason" class="muted"></span>
+  </div>
+
+  <div id="token-missing" class="fatal" hidden>
+    This page needs the console token. Open the console with the full URL printed in the terminal when the server started
+    (it ends with <code>#token=…</code>).
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button type="button" data-tab="jobs" class="active">Jobs</button>
+    <button type="button" data-tab="webhooks">Webhooks <span id="event-count" class="count"></span></button>
+    <button type="button" data-tab="reference">Reference data</button>
+    <button type="button" data-tab="installs">Installs</button>
+    <button type="button" data-tab="coverage">Test coverage</button>
+  </nav>
+
+  <main>
+    <!-- Jobs ----------------------------------------------------------------------------- -->
+    <section id="tab-jobs" class="tab">
+      <div class="jobs-layout">
+        <div class="col-list">
+          <form id="job-filter" class="card filter">
+            <label>Status
+              <select name="status" id="filter-status"><option value="">any</option></select>
+            </label>
+            <label>Updated since
+              <input type="datetime-local" name="updated_since" step="1">
+            </label>
+            <label>Per page
+              <select name="limit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select>
+            </label>
+            <button type="submit">List jobs</button>
+          </form>
+
+          <form id="ext-lookup" class="card filter">
+            <label class="grow">Look up by your reference
+              <span class="prefixed"><span>ext:</span><input type="text" name="ref" placeholder="EX-2026-11-17-ab12cd34" required></span>
+            </label>
+            <button type="submit">Open</button>
+          </form>
+
+          <details id="create-card" class="card">
+            <summary>New job</summary>
+            <form id="create-form" class="form-grid">
+              <p class="hint wide">Prefilled with obviously fake example data. Reference lists need the <code>reference:read</code> scope.
+                <button type="button" id="create-load-ref" class="small">Load reference data</button></p>
+              <label class="wide">Title <input name="title" required maxlength="255"></label>
+              <label class="wide">Description <textarea name="description" rows="2" required maxlength="10000"></textarea></label>
+              <label class="wide">Address <input name="address" required maxlength="500"></label>
+              <label>Unit <input name="unit" maxlength="100"></label>
+              <label>Suburb <input name="suburb" required></label>
+              <label>State
+                <select name="state">
+                  <option>NSW</option><option>VIC</option><option>QLD</option><option>SA</option>
+                  <option>WA</option><option>TAS</option><option>NT</option><option>ACT</option>
+                </select>
+              </label>
+              <label>Postcode <input name="postcode" required pattern="\d{4}" maxlength="4"></label>
+              <label class="wide">Access instructions <input name="access_instructions" maxlength="2000"></label>
+              <label>Job type <select name="job_type_id"><option value="">(none)</option></select></label>
+              <label>Urgency
+                <select name="urgency"><option>LOW</option><option selected>NORMAL</option><option>HIGH</option><option>URGENT</option><option>EMERGENCY</option></select>
+              </label>
+              <fieldset class="wide picklist"><legend>Trades (first ticked is primary)</legend><div id="create-trades" class="muted">Load reference data to pick trades. Optional.</div></fieldset>
+              <fieldset class="wide picklist"><legend>Accreditations required</legend><div id="create-accreditations" class="muted">Load reference data to pick accreditations. Optional.</div></fieldset>
+              <label>Preferred start <input type="date" name="preferred_start_date"></label>
+              <label>Time window
+                <input name="time_window" list="time-windows" placeholder="MORNING or 08:00-12:00">
+                <datalist id="time-windows"><option>MORNING</option><option>AFTERNOON</option><option>FULL_DAY</option><option>08:00-12:00</option></datalist>
+              </label>
+              <label>End customer name <input name="end_customer_name"></label>
+              <label>End customer phone <input name="end_customer_phone"></label>
+              <label class="wide">End customer email <input type="email" name="end_customer_email"></label>
+              <label>Site contact name <input name="contact_name"></label>
+              <label>Site contact role
+                <select name="contact_role"><option>SITE_OWNER</option><option>PROPERTY_MANAGER</option><option>TENANT</option><option>OTHER</option></select>
+              </label>
+              <label>Site contact phone <input name="contact_phone"></label>
+              <label>Price ex GST ($) <input name="price_dollars" inputmode="decimal" placeholder="optional"></label>
+              <label class="wide">Notes (internal to your company) <textarea name="notes" rows="2" maxlength="10000"></textarea></label>
+              <label>Your reference (external_reference) <input name="external_reference" maxlength="255"></label>
+              <label>Idempotency-Key <input name="idempotency_key" maxlength="255" class="mono"></label>
+              <fieldset class="wide inline">
+                <legend>On create</legend>
+                <label><input type="radio" name="publish" value="false" checked> Save as DRAFT</label>
+                <label><input type="radio" name="publish" value="true"> Publish (OPEN)</label>
+              </fieldset>
+              <div class="wide actions">
+                <button type="submit" class="primary">Create job</button>
+                <button type="button" id="create-fresh">Fresh reference and key</button>
+                <span class="hint">Send the same Idempotency-Key and body again to see TC replay the original job.</span>
+              </div>
+              <div class="wide" id="create-result"></div>
+            </form>
+          </details>
+
+          <div class="card">
+            <table class="list" id="jobs-table">
+              <thead><tr><th>Reference</th><th>Title</th><th>Status</th><th>Updated</th></tr></thead>
+              <tbody><tr><td colspan="4" class="muted">Press “List jobs”.</td></tr></tbody>
+            </table>
+            <div class="actions"><button type="button" id="load-more" hidden>Load more</button><span id="list-result"></span></div>
+          </div>
+        </div>
+
+        <div class="col-detail" id="job-detail">
+          <div class="card muted">Pick a job, create one, or look one up by reference.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Webhooks ------------------------------------------------------------------------- -->
+    <section id="tab-webhooks" class="tab" hidden>
+      <div class="card filter">
+        <label>Environment
+          <select id="feed-env"><option value="">both</option><option value="sandbox">sandbox</option><option value="live">live</option></select>
+        </label>
+        <label>Type <select id="feed-type"><option value="">any</option></select></label>
+        <label class="inline"><input type="checkbox" id="feed-rejected" checked> show refused deliveries</label>
+        <span class="hint">Polled every 3 seconds. Newest first.</span>
+      </div>
+      <div id="event-feed" class="feed"></div>
+    </section>
+
+    <!-- Reference ------------------------------------------------------------------------ -->
+    <section id="tab-reference" class="tab" hidden>
+      <div class="card">
+        <p>Job types, trade types and accreditations to use when creating jobs. These routes need the
+          <code>reference:read</code> scope, which new keys do not get by default.</p>
+        <button type="button" id="ref-load">Load reference data</button>
+        <div id="ref-result"></div>
+      </div>
+      <div class="ref-grid">
+        <div class="card"><h3>Job types</h3><div id="ref-job-types" class="scroll"></div></div>
+        <div class="card"><h3>Trade types</h3><div id="ref-trade-types" class="scroll"></div></div>
+        <div class="card"><h3>Accreditations</h3><div id="ref-accreditations" class="scroll"></div></div>
+      </div>
+    </section>
+
+    <!-- Installs ------------------------------------------------------------------------- -->
+    <section id="tab-installs" class="tab" hidden>
+      <div id="installs-sandbox" class="card">
+        <p>Install registrations have no sandbox in Trade Connector: they need a production (<code>tc_live_</code>) key with
+          <code>installs:read</code> / <code>installs:write</code>, and are for manufacturer companies only.
+          Switch to Live (when enabled in config) to use them. Reads are free; writes ask you to type LIVE.</p>
+      </div>
+      <div id="installs-live" hidden>
+        <form id="installs-filter" class="card filter">
+          <label>Serial <input name="serial"></label>
+          <label>Status <input name="status" placeholder="e.g. REGISTERED,VERIFIED"></label>
+          <label>Updated since <input type="datetime-local" name="updated_since" step="1"></label>
+          <button type="submit">List installs</button>
+        </form>
+        <div class="card">
+          <table class="list" id="installs-table">
+            <thead><tr><th>Serial</th><th>Model</th><th>Status</th><th>Updated</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <div class="actions"><button type="button" id="installs-more" hidden>Load more</button></div>
+          <div id="installs-result"></div>
+        </div>
+        <details class="card">
+          <summary>Register or update an install (live write)</summary>
+          <form id="install-form" class="form-grid">
+            <label>Serial number <input name="serial_number" required></label>
+            <label>Model <input name="model"></label>
+            <label>Installed on <input type="date" name="installed_on"></label>
+            <label>Installer name <input name="installer_name"></label>
+            <label>Site address <input name="site_address"></label>
+            <label>Site suburb <input name="site_suburb"></label>
+            <label>Site state <input name="site_state"></label>
+            <label>Site postcode <input name="site_postcode"></label>
+            <label>Homeowner name <input name="homeowner_name"></label>
+            <label>Homeowner email <input name="homeowner_email"></label>
+            <label>Your reference <input name="external_reference"></label>
+            <div class="wide actions"><button type="submit" class="danger">Save install (LIVE)</button></div>
+            <div class="wide" id="install-form-result"></div>
+          </form>
+        </details>
+      </div>
+    </section>
+
+    <!-- Coverage ------------------------------------------------------------------------- -->
+    <section id="tab-coverage" class="tab" hidden>
+      <div class="card">
+        <p>Every Partner API operation and webhook event type, ticked when it succeeded or arrived. Kept in
+          <code>data/coverage.json</code> until you reset it. <span id="coverage-started" class="muted"></span></p>
+        <button type="button" id="coverage-reset">Reset checklist</button>
+      </div>
+      <div class="card"><h3>API operations</h3><div id="coverage-endpoints"></div></div>
+      <div class="card"><h3>Webhook events</h3><div id="coverage-events"></div></div>
+    </section>
+  </main>
+
+  <dialog id="live-dialog">
+    <form method="dialog" id="live-dialog-form">
+      <h2>Confirm a LIVE action</h2>
+      <p id="live-dialog-text"></p>
+      <label>Type <strong>LIVE</strong> to confirm <input id="live-dialog-input" autocomplete="off" spellcheck="false"></label>
+      <div class="actions">
+        <button value="cancel" type="submit" formnovalidate>Cancel</button>
+        <button value="confirm" type="submit" class="danger" id="live-dialog-confirm" disabled>Confirm</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>

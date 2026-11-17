@@ -10,3 +10,8 @@ data/
 # internal working files (lane briefs, logs) — never published
 scratch/
 .claude/
+
+# smoke-test and editor leftovers
+*.tmp
+.vscode/
+.idea/
