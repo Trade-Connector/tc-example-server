@@ -90,7 +90,7 @@ to TC support. A `403 SCOPE_FORBIDDEN` on reference data means the key needs `re
 | --- | --- |
 | Header | Switch Sandbox / Live, see the key prefix, base URL and API health, and the webhook URLs to paste into TC. |
 | Jobs | The list loads when the console opens: status and `updated_since` filters, open a job by your own reference (`ext:`), load more (keyset pagination). **New job** loads reference data by itself and creates jobs as draft or published with an `Idempotency-Key`; pressing Create again with the same key shows TC's replay (amber, no new job). When TC lists trades per accreditation, only the ticked trades' accreditations are offered (with "Show all"). |
-| Selected job | Headed "Selected job: reference · status". Cards in order: details and raw JSON, edit (disabled with the reason once TC would answer `JOB_LOCKED`), add a note, upload an attachment (all three steps, choosing who can see it), and publish last for a draft; past DRAFT, one button per sandbox simulate step and cancel (fee rules shown first, TC's fee fields after). Each card shows its own result under its button. |
+| Selected job | Headed "Selected job: reference · status". Cards in order: details and raw JSON, edit (disabled with the reason once TC would answer `JOB_LOCKED`), add a note, upload an attachment (all three steps, choosing who can see it), then publish and cancel for a draft; past DRAFT, one button per sandbox simulate step, then cancel (fee rules shown first, TC's fee fields after). Each card shows its own result under its button. |
 | Webhooks | A live feed of every delivery and a timeline per job: type, environment, signature check, and duplicate or out-of-order flags, with the raw payload. |
 | Reference data | Job types, trade types and accreditations. |
 | Installs | For manufacturers, production keys only: list, look up and register installs. |
@@ -111,11 +111,11 @@ each within about a minute).
 
 | Group | What it checks |
 | --- | --- |
-| Keys & health | `GET /v1/health`; the key is a `tc_test_` key; the sandbox webhook secret is set; each scope, worked out from the calls that need it, with what to tick if one is missing. |
+| Keys & health | The key is a `tc_test_` key, checked before any request (with any other key nothing is sent); `GET /v1/health`; the sandbox webhook secret is set; each scope, worked out from the calls that need it, with what to tick if one is missing. |
 | Reference data | Job types, trade types and accreditations. |
 | Jobs | Create a draft with an `Idempotency-Key`, then the same key and body again (200, the same job); a second, published job; get by id and by `ext:`; list with `updated_since`, one page at a time; PATCH a field and the price; add a note; publish; and a PATCH after ASSIGNED must get `409 JOB_LOCKED`. |
 | Attachments | All three upload steps with a tiny generated PNG, private, `SITE_PHOTO`. |
-| Sandbox lifecycle | Simulate one step per call, OPEN → ASSIGNED → SCHEDULED → IN_PROGRESS → WORK_COMPLETE → PAID; cancel the second job with a reason (CANCELLED, and no fee in the sandbox). |
+| Sandbox lifecycle | Simulate one step per call, OPEN → ASSIGNED → SCHEDULED → IN_PROGRESS → WORK_COMPLETE → PAID; simulate the second job to ASSIGNED, then cancel it with a reason (CANCELLED, and `fee_applied` false: a sandbox cancel stays free after an installer is assigned, too). |
 | Webhooks | Every event those steps should send (worked out from TC's event triggers) arrives, signature verified, with the right job and status; the last copy of each job matches a fresh `GET`; and nothing unexpected arrived. Waits up to 2 minutes per step. |
 | Security | A forged signature and an unsigned delivery, posted to this server's own listener, both get 401. |
 
