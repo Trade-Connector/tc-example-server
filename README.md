@@ -77,6 +77,10 @@ For how the API itself works (keys, errors, statuses, cancellation, webhooks), r
 
    The demo only ever uses the sandbox key.
 
+8. **Check everything in one go.** In the console's **Sandbox check** tab, press **Run full sandbox check**
+   (or run `npm run check:sandbox`). It walks every API call and waits for every webhook, then shows what
+   passed, what failed and what needs you. See [One-click sandbox check](#one-click-sandbox-check).
+
 If a call fails, the console shows TC's `error.code`, message, details and `request_id`. Quote the `request_id`
 to TC support. A `403 SCOPE_FORBIDDEN` on reference data means the key needs `reference:read` ticked.
 
@@ -85,12 +89,62 @@ to TC support. A `403 SCOPE_FORBIDDEN` on reference data means the key needs `re
 | Area | What you can do |
 | --- | --- |
 | Header | Switch Sandbox / Live, see the key prefix, base URL and API health, and the webhook URLs to paste into TC. |
-| Jobs | List with status and `updated_since` filters, look up by your own reference (`ext:`), load more (keyset pagination), create jobs as draft or published with an `Idempotency-Key`. |
-| Job detail | Summary and raw JSON, edit (disabled with the reason once TC would answer `JOB_LOCKED`), publish, add a note, upload an attachment (all three steps, choosing who can see it), cancel with the fee rules shown first and TC's fee fields after, and one button per sandbox simulate step. |
+| Jobs | The list loads when the console opens: status and `updated_since` filters, open a job by your own reference (`ext:`), load more (keyset pagination). **New job** loads reference data by itself and creates jobs as draft or published with an `Idempotency-Key`; pressing Create again with the same key shows TC's replay (amber, no new job). When TC lists trades per accreditation, only the ticked trades' accreditations are offered (with "Show all"). |
+| Selected job | Headed "Selected job: reference · status". Cards in order: details and raw JSON, edit (disabled with the reason once TC would answer `JOB_LOCKED`), add a note, upload an attachment (all three steps, choosing who can see it), and publish last for a draft; past DRAFT, one button per sandbox simulate step and cancel (fee rules shown first, TC's fee fields after). Each card shows its own result under its button. |
 | Webhooks | A live feed of every delivery and a timeline per job: type, environment, signature check, and duplicate or out-of-order flags, with the raw payload. |
 | Reference data | Job types, trade types and accreditations. |
 | Installs | For manufacturers, production keys only: list, look up and register installs. |
-| Test coverage | Every API operation and webhook event type, ticked when it succeeds or arrives. Events the sandbox cannot produce say how to trigger them instead. Kept in `data/` until you reset it. |
+| Sandbox check | The whole API and every webhook in one press, sandbox only. See below. |
+| Test coverage | Every API operation and webhook event type, ticked when it succeeds or arrives (the sandbox check ticks it too). Events the sandbox cannot produce say how to trigger them instead. Kept in `data/` until you reset it. |
+
+Every button shows that it was pressed, is busy (and disabled) while its request runs, then flashes green or red.
+A double-click never sends a request twice. A button that has nothing to send says why instead ("Choose a file
+first", "Write a note first").
+
+## One-click sandbox check
+
+The **Sandbox check** tab's **Run full sandbox check** button and `npm run check:sandbox` run the same code. It
+uses only the sandbox key: the button is not on the page in live mode, and the command refuses to run without a
+`tc_test_` key. It creates two jobs of its own, `CHECK-<date>-<tag>-A` (the full lifecycle) and `-B` (the cancel
+path), and never changes any other job. It takes a few minutes, because it waits for every webhook (TC sends
+each within about a minute).
+
+| Group | What it checks |
+| --- | --- |
+| Keys & health | `GET /v1/health`; the key is a `tc_test_` key; the sandbox webhook secret is set; each scope, worked out from the calls that need it, with what to tick if one is missing. |
+| Reference data | Job types, trade types and accreditations. |
+| Jobs | Create a draft with an `Idempotency-Key`, then the same key and body again (200, the same job); a second, published job; get by id and by `ext:`; list with `updated_since`, one page at a time; PATCH a field and the price; add a note; publish; and a PATCH after ASSIGNED must get `409 JOB_LOCKED`. |
+| Attachments | All three upload steps with a tiny generated PNG, private, `SITE_PHOTO`. |
+| Sandbox lifecycle | Simulate one step per call, OPEN → ASSIGNED → SCHEDULED → IN_PROGRESS → WORK_COMPLETE → PAID; cancel the second job with a reason (CANCELLED, and no fee in the sandbox). |
+| Webhooks | Every event those steps should send (worked out from TC's event triggers) arrives, signature verified, with the right job and status; the last copy of each job matches a fresh `GET`; and nothing unexpected arrived. Waits up to 2 minutes per step. |
+| Security | A forged signature and an unsigned delivery, posted to this server's own listener, both get 401. |
+
+**Also test TC retries** (a tick box; adds about 2 minutes): the listener answers 500, once, to the next delivery
+for the check's own job, and the check expects TC to send the same `webhook-id` again about a minute later. The
+switch is sandbox-only, for that one job and one delivery, expires on its own, and never answers 410.
+
+Some things only a person can do. They show amber, not failed, and tick when they really happen (the console keeps
+watching after a run): press **Replay** on a delivery in TC (Settings → API & Webhooks → Webhooks → Deliveries)
+and see it flagged duplicate; `job.rescheduled`, which needs the TC web app; and `webhook.test` from **Send test
+event**.
+
+Each row opens to show the requests and answers, timing, and TC's error code and `request_id` on failure. A live
+timeline shows each status with its webhooks dropping in. **Copy report** copies a plain-text summary (no
+formatting) ready to paste into WhatsApp or an email. The last five runs are kept in `data/sandbox-check-runs.json`
+and can be viewed in the tab, with rows that changed since the run before marked, to compare before and after a
+TC release.
+
+From a terminal:
+
+```sh
+npm run check:sandbox                # the full check
+npm run check:sandbox -- --retries   # also test TC retries
+```
+
+If `npm start` is not running, the command listens on the webhook port itself (your tunnel must point there). If
+it is running, the server receives the webhooks and the command reads them from `data/`; the retry test then needs
+the console button. The command prints the same plain-text report and exits 1 if anything failed (items that need
+you do not count).
 
 ## Going live
 
@@ -112,7 +166,7 @@ In live mode:
 - **Every write** (create, edit, publish, note, attachment, cancel, install) asks you to type `LIVE`. The server
   enforces this, not just the page: a write must carry a one-time token issued for that exact action, job and
   request body.
-- Simulate is not offered (TC only allows it in the sandbox).
+- Simulate and the sandbox check are not offered (TC only allows simulate in the sandbox).
 - `npm run demo` never uses the live key.
 
 The server refuses to start if a `tc_live_` key is in a test setting or a `tc_test_` key is in a live setting.
@@ -137,13 +191,18 @@ The server refuses to start if a `tc_live_` key is in a test setting or a `tc_te
 src/
   tc/              The API client: client.ts, errors.ts, types.ts   ← copy these
   webhooks/        verify.ts (signatures), store.ts (dedupe, ordering), events.ts
-  server/          webhook-listener.ts, console-server.ts, console-api.ts,
+  check/           The sandbox check: sandbox-check.ts (the steps), report.ts, history.ts,
+                   retry-probe.ts (the listener's one-shot 500 switch), event-source.ts
+  server/          webhook-listener.ts, console-server.ts, console-api.ts, check-manager.ts,
                    live-guard.ts (live confirmations), coverage.ts
   config.ts        Environment variables and the key-slot checks
   log.ts           Logger that masks secrets
   main.ts          npm start
   demo.ts          npm run demo
+  check-sandbox.ts npm run check:sandbox
 public/            The console page: index.html, app.js, styles.css (no build step)
+  lib/             The page's logic without the DOM (tested in Node)
+  brand/           brand.css (every colour) and icon.svg: swap these to rebrand
 test/              node:test suites; helpers/tc-signer.ts signs like TC does
 docs/              The integration guide and notes on API versions
 data/              Received events, refused deliveries, job snapshots, coverage (git-ignored, created on start)
@@ -169,6 +228,7 @@ data/              Received events, refused deliveries, job snapshots, coverage 
 | `npm start` | Starts the webhook listener (127.0.0.1:3001) and the console (127.0.0.1:3000). |
 | `npm run demo` | Walks one sandbox job through its life. Add `-- --cancel` for the cancel path, `-- --pause=5000` to slow it down. |
 | `npm test` | Runs the tests. They make no network calls. |
+| `npm run check:sandbox` | Runs the one-click sandbox check from the terminal. Add `-- --retries` to also test TC's retries. |
 | `npm run typecheck` | Type-checks with `tsc`. |
 
 ## Dependencies
@@ -183,6 +243,15 @@ Development only:
 - `@types/node` (version 22): Node's type definitions, pinned to the oldest supported Node so the code uses
   nothing newer.
 
+## Brand and trademarks
+
+The Trade Connector name and logo are trademarks of Solar Cutter Solutions Pty Ltd and are not covered by the MIT
+licence.
+
+The console's brand is kept in one folder, `public/brand/`: `brand.css` holds every colour the console uses (as
+CSS variables) and `icon.svg` is the logo. To use your own brand, replace those two files and change the title in
+`public/index.html`. The reusable code (`src/tc/`, `src/webhooks/`) carries no brand.
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The Trade Connector name and logo are not covered (see above).

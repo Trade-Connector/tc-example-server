@@ -1,0 +1,17 @@
+# Weekly update checks for the two dev dependencies (typescript, @types/node) and the GitHub
+# Actions used by CI. CI runs on every push and pull request, so each update is tested.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # @types/node stays on the oldest supported Node (22), so the code uses nothing newer.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

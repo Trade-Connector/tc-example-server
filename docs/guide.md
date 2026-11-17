@@ -312,6 +312,9 @@ Needs `reference:read`, which new keys do not get by default.
 | `GET /v1/reference/trade-types` | `{ code, name, category }` |
 | `GET /v1/reference/accreditations` | `{ id, name, category, issuing_body, type, scope }` |
 
+TC is adding `trade_type_codes` (a list of trade type codes) to each accreditation, within v1. It is not sent yet.
+When it arrives, use it to offer only the accreditations that fit the job's trades; until then, offer them all.
+
 ## Sandbox simulation
 
 `POST /v1/sandbox/jobs/{id}/simulate` with `{"status": "<target>"}`. `tc_test_` keys and sandbox jobs only

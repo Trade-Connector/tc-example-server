@@ -1,9 +1,33 @@
 # Changelog
 
 All notable changes to this project are recorded here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [semantic versioning](https://semver.org/).
+[Keep a Changelog](https://keepachangelog.com/), and the project uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
+
+### Added
+
+- One-click sandbox check: `npm run check:sandbox` and the console's **Run full sandbox check** button run the same
+  code. Sandbox key only, with two jobs of its own. It checks every API call, waits for every webhook the steps
+  should send (signature verified, the right job and status, matching a fresh `GET`), reports missing and
+  unexpected events, infers the key's scopes, and self-tests the listener with a forged and an unsigned delivery.
+  Optional retry test (a one-shot 500 for the check's own job, never 410). Manual items tick when they happen.
+  Plain-text report; the last five runs are kept in `data/`.
+- Console branding: "Trade Connector API Console", the TC logo and green, all colours in `public/brand/brand.css`.
+- `Accreditation.trade_type_codes` (optional): TC is adding it within v1. The console offers only the ticked
+  trades' accreditations when it is present, and all of them when it is not.
+- Dependabot for npm and GitHub Actions, weekly.
+
+### Changed
+
+- Console: the job list and the New job form's reference data load by themselves; an idempotent replay shows an
+  amber box; results appear under the button that was used; the right panel is headed "Selected job"; cards are
+  in a fixed order (Publish last for a draft); every button shows busy, success and failure, and a double-click
+  never sends twice; buttons that have nothing to send say why.
+
+### Fixed
+
+- A stray "null" beside "Price ex GST" in the console's Edit card.
 
 ## [0.1.0] - 2026-11-17
 
