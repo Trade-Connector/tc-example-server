@@ -1,0 +1,24 @@
+{
+  // Type-check only. Node runs the .ts files directly (built-in type stripping, Node >= 22.18),
+  // so there is no build step and no emitted JavaScript.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "exactOptionalPropertyTypes": false,
+    // What Node's type stripping needs: explicit .ts imports, type-only imports marked,
+    // and no TypeScript-only runtime syntax (enums, namespaces, parameter properties).
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}
