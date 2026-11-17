@@ -237,6 +237,17 @@ describe("sandbox mode", () => {
     assert.equal((step3!.body as Record<string, unknown>).is_public, false);
   });
 
+  it("refuses a job id that is neither a UUID nor ext:<reference> (400), without calling TC", async () => {
+    tcCalls.length = 0;
+    for (const id of [".", "..", "not-a-job"]) {
+      const res = await call("GET", `/api/jobs/${id}`);
+      assert.equal(res.status, 400, id);
+      assert.equal(res.json.error.code, "INVALID_JOB_ID", id);
+    }
+    assert.equal(tcCalls.length, 0);
+    assert.equal((await call("GET", `/api/jobs/${encodeURIComponent("ext:WO-10042")}`)).json.error?.code, "NOT_FOUND", "a valid ext: id reaches (fake) TC");
+  });
+
   it("refuses installs (they have no sandbox)", async () => {
     tcCalls.length = 0;
     const res = await call("GET", "/api/installs");

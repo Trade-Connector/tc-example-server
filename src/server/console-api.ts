@@ -7,7 +7,7 @@
 import type { Config } from "../config.ts";
 import { keyPrefix, log } from "../log.ts";
 import { TcClient, type ResponseInfo } from "../tc/client.ts";
-import { TcApiError } from "../tc/errors.ts";
+import { TcApiError, TcInputError } from "../tc/errors.ts";
 import {
   ATTACHMENT_CONTENT_TYPES,
   MAX_ATTACHMENT_BYTES,
@@ -460,6 +460,12 @@ export async function runRoute(
       return {
         status: error.status >= 400 ? error.status : 502,
         body: { error: { source: "tc", ...error.toJSON() }, environment, calls: callList() },
+      };
+    }
+    if (error instanceof TcInputError) {
+      return {
+        status: 400,
+        body: { error: { source: "console", code: error.code, message: error.message }, environment, calls: callList() },
       };
     }
     if (error instanceof GuardError || error instanceof ConsoleError) {

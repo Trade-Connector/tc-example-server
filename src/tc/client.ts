@@ -14,7 +14,7 @@
 // - Keyset pagination (data / has_more / next_cursor) with an async iterator.
 // - 429 RATE_LIMITED: waits for Retry-After and retries, a bounded number of times.
 
-import { TcApiError, parseTcError } from "./errors.ts";
+import { TcApiError, TcInputError, parseTcError } from "./errors.ts";
 import type {
   Accreditation,
   AttachmentRecord,
@@ -108,16 +108,27 @@ interface RequestOptions {
 
 const DEFAULT_USER_AGENT = "tc-example-server/0.1.0";
 
+// Methods that build a job path are async, so a bad id is a rejected promise, never a throw.
+const UUID_FORMAT = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
 /**
- * Builds the path segment for a job id. Accepts TC's UUID or `ext:<your external_reference>`.
- * The reference is URL-encoded, so references with spaces or slashes are safe.
+ * Builds the path segment for a job id: TC's UUID, or `ext:<your external_reference>` (1 to 255
+ * characters, URL-encoded, so references with spaces or slashes are safe). Anything else throws
+ * TcInputError before a request is made: a value such as "." or ".." would otherwise be removed
+ * by URL parsing and silently call a different route.
  */
 export function jobIdSegment(id: string): string {
-  const trimmed = id.trim();
+  const trimmed = String(id).trim();
   if (trimmed.startsWith("ext:")) {
-    return `ext:${encodeURIComponent(trimmed.slice(4))}`;
+    const reference = trimmed.slice(4).trim();
+    if (reference.length >= 1 && reference.length <= 255) return `ext:${encodeURIComponent(reference)}`;
+  } else if (UUID_FORMAT.test(trimmed)) {
+    return trimmed;
   }
-  return encodeURIComponent(trimmed);
+  throw new TcInputError(
+    "INVALID_JOB_ID",
+    `"${trimmed.slice(0, 80)}" is not a job id: use TC's UUID, or ext:<your external_reference> (1 to 255 characters)`,
+  );
 }
 
 /** Convenience: the id to use for a job you know by your own reference. */
@@ -214,7 +225,7 @@ export class TcClient {
   }
 
   /** id is TC's UUID or `ext:<your external_reference>`. */
-  getJob(id: string): Promise<Job> {
+  async getJob(id: string): Promise<Job> {
     return this.#request({ operation: "jobs.get", method: "GET", path: `/v1/jobs/${jobIdSegment(id)}` });
   }
 
@@ -243,7 +254,7 @@ export class TcClient {
   }
 
   /** PATCH. Only while the job is DRAFT or OPEN, otherwise 409 JOB_LOCKED. */
-  updateJob(id: string, patch: UpdateJobRequest): Promise<Job> {
+  async updateJob(id: string, patch: UpdateJobRequest): Promise<Job> {
     return this.#request({
       operation: "jobs.update",
       method: "PATCH",
@@ -253,7 +264,7 @@ export class TcClient {
   }
 
   /** Moves a DRAFT job to OPEN (live to installers, for a production job). */
-  publishJob(id: string): Promise<Job> {
+  async publishJob(id: string): Promise<Job> {
     return this.updateJob(id, { publish: true });
   }
 
@@ -262,7 +273,7 @@ export class TcClient {
    * docs/guide.md); the response says whether one was applied. Sandbox cancellations are free.
    * Needs the jobs:cancel scope.
    */
-  cancelJob(id: string, reason?: string): Promise<CancelJobResponse> {
+  async cancelJob(id: string, reason?: string): Promise<CancelJobResponse> {
     return this.#request({
       operation: "jobs.cancel",
       method: "POST",
@@ -272,7 +283,7 @@ export class TcClient {
   }
 
   /** Adds a note. Once an installer is assigned, it also reaches them as a chat message. */
-  addNote(id: string, body: string): Promise<JobNote> {
+  async addNote(id: string, body: string): Promise<JobNote> {
     return this.#request({
       operation: "jobs.notes",
       method: "POST",
@@ -286,7 +297,7 @@ export class TcClient {
   // -------------------------------------------------------------------------------------------
 
   /** Step 1: ask TC for a signed upload URL. */
-  createAttachmentUpload(id: string, req: CreateAttachmentRequest): Promise<AttachmentUpload> {
+  async createAttachmentUpload(id: string, req: CreateAttachmentRequest): Promise<AttachmentUpload> {
     return this.#request({
       operation: "attachments.create",
       method: "POST",
@@ -336,7 +347,7 @@ export class TcClient {
    * Step 3: tell TC the upload is done. TC re-checks the file's type, size and signature.
    * This is where is_public goes, and TC makes the file PUBLIC when it is left out.
    */
-  completeAttachmentUpload(
+  async completeAttachmentUpload(
     id: string,
     attachmentId: string,
     req: CompleteAttachmentRequest,
@@ -380,7 +391,7 @@ export class TcClient {
    * Moves a sandbox job forward (tc_test_ keys only). One call per step gives one
    * job.status_changed webhook per step; a jump of several steps gives a single event.
    */
-  simulate(id: string, status: SimulateTarget): Promise<Job> {
+  async simulate(id: string, status: SimulateTarget): Promise<Job> {
     return this.#request({
       operation: "sandbox.simulate",
       method: "POST",
@@ -407,11 +418,16 @@ export class TcClient {
     });
   }
 
-  getInstall(serial: string): Promise<InstallRegistration> {
+  async getInstall(serial: string): Promise<InstallRegistration> {
+    const trimmed = String(serial).trim();
+    // "." and ".." survive encoding and would be removed by URL parsing (calling the list route).
+    if (trimmed === "" || trimmed === "." || trimmed === "..") {
+      throw new TcInputError("INVALID_SERIAL", "serial must be a serial number");
+    }
     return this.#request({
       operation: "installs.get",
       method: "GET",
-      path: `/v1/installs/${encodeURIComponent(serial.trim())}`,
+      path: `/v1/installs/${encodeURIComponent(trimmed)}`,
     });
   }
 

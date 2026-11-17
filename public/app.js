@@ -386,10 +386,11 @@ function fillCreateDefaults() {
   f.preferred_start_date.value = today(7);
   f.time_window.value = "MORNING";
   f.end_customer_name.value = "Alex Example";
-  f.end_customer_phone.value = "0400 000 000";
+  // Numbers from ACMA's list reserved for fiction: they never reach a real person.
+  f.end_customer_phone.value = "0491 570 006";
   f.end_customer_email.value = "alex@example.com";
   f.contact_name.value = "Alex Example";
-  f.contact_phone.value = "0400 000 000";
+  f.contact_phone.value = "0491 570 156";
   f.price_dollars.value = "1500.00";
   freshIdentifiers();
 }

@@ -45,7 +45,7 @@ function printError(error: unknown): void {
   }
 }
 
-/** Obviously fake example data. */
+/** Obviously fake example data. Phone numbers are from ACMA's range reserved for fiction. */
 function exampleJob(tradeCodes: string[]): CreateJobRequest {
   const ref = `DEMO-${new Date().toISOString().slice(0, 10)}-${randomUUID().slice(0, 8)}`;
   const start = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
@@ -63,8 +63,8 @@ function exampleJob(tradeCodes: string[]): CreateJobRequest {
     },
     schedule: { preferred_start_date: start, time_window: "MORNING" },
     urgency: "NORMAL",
-    end_customer: { name: "Alex Example", email: "alex@example.com", phone: "0400 000 000" },
-    contacts: [{ name: "Alex Example", phone: "0400 000 000", email: "alex@example.com", role: "SITE_OWNER" }],
+    end_customer: { name: "Alex Example", email: "alex@example.com", phone: "0491 570 006" },
+    contacts: [{ name: "Alex Example", phone: "0491 570 156", email: "alex@example.com", role: "SITE_OWNER" }],
     price: { ex_gst_cents: 150_000 },
     publish: true,
   };

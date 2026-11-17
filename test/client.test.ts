@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { jobIdSegment, paginate, TcClient, type ResponseInfo } from "../src/tc/client.ts";
-import { parseRetryAfter, TcApiError } from "../src/tc/errors.ts";
+import { parseRetryAfter, TcApiError, TcInputError } from "../src/tc/errors.ts";
 import { sampleJob } from "./helpers/tc-signer.ts";
 
 const BASE = "https://tc.example.test/functions/v1/partner-api";
 const KEY = `tc_test_${"ab".repeat(24)}`;
+const JOB = "6f1c2a8e-1111-4c4c-9d9d-000000000001";
 
 interface Captured {
   url: URL;
@@ -85,7 +86,7 @@ describe("TcClient", () => {
   it("gives an environment hint, not a scope hint, for simulate with the wrong key", async () => {
     const { fetchFn } = scripted([{ status: 403, body: tcError("SCOPE_FORBIDDEN", "Sandbox simulation is only available with sandbox (tc_test_) API keys") }]);
     const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
-    await assert.rejects(tc.simulate("x", "ASSIGNED"), (error: TcApiError) => /one environment/.test(error.hint ?? ""));
+    await assert.rejects(tc.simulate(JOB, "ASSIGNED"), (error: TcApiError) => /one environment/.test(error.hint ?? ""));
   });
 
   it("handles a non-JSON error body (e.g. a proxy page)", async () => {
@@ -104,9 +105,10 @@ describe("TcClient", () => {
   });
 
   it("URL-encodes ext: references", async () => {
-    assert.equal(jobIdSegment("ext:SH-10042"), "ext:SH-10042");
+    assert.equal(jobIdSegment("ext:WO-10042"), "ext:WO-10042");
     assert.equal(jobIdSegment("ext:WO 10/42?x#y"), "ext:WO%2010%2F42%3Fx%23y");
-    assert.equal(jobIdSegment("../../v1/installs"), "..%2F..%2Fv1%2Finstalls");
+    assert.equal(jobIdSegment("ext:.."), "ext:..", "a reference of dots is fine after ext:");
+    assert.equal(jobIdSegment(` ${JOB.toUpperCase()} `), JOB.toUpperCase());
     const { calls, fetchFn } = scripted([{ status: 200, body: sampleJob() }, { status: 201, body: { id: "n1" } }]);
     const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
     await tc.getJob("ext:WO 10/42");
@@ -114,6 +116,21 @@ describe("TcClient", () => {
     assert.equal(calls[0]!.url.pathname, "/functions/v1/partner-api/v1/jobs/ext:WO%2010%2F42");
     assert.equal(calls[1]!.url.pathname, "/functions/v1/partner-api/v1/jobs/ext:A%26B/notes");
     assert.deepEqual(JSON.parse(calls[1]!.body!), { body: "hello" });
+  });
+
+  it("accepts only a UUID or ext:<reference> as a job id, and sends nothing otherwise", async () => {
+    for (const bad of [".", "..", "", "   ", "ext:", "ext:   ", `ext:${"x".repeat(256)}`, "WO-10042", "job-1", "../../v1/installs", `${JOB}/notes`, `${JOB.slice(0, -1)}`]) {
+      assert.throws(() => jobIdSegment(bad), TcInputError, JSON.stringify(bad));
+    }
+    assert.equal(jobIdSegment(`ext:${"x".repeat(255)}`).length, 4 + 255);
+    const { calls, fetchFn } = scripted([]);
+    const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
+    // "." would otherwise become GET /v1/jobs/ (the list) and come back typed as one job.
+    await assert.rejects(tc.getJob("."), (error: unknown) => error instanceof TcInputError && error.code === "INVALID_JOB_ID");
+    await assert.rejects(tc.cancelJob(".."), TcInputError);
+    await assert.rejects(tc.addNote("job-1", "hi"), TcInputError);
+    await assert.rejects(tc.getInstall(".."), (error: unknown) => error instanceof TcInputError && error.code === "INVALID_SERIAL");
+    assert.equal(calls.length, 0);
   });
 
   it("walks keyset pages with next_cursor (which contains a | and must be encoded)", async () => {
@@ -200,7 +217,7 @@ describe("TcClient", () => {
   it("uploads an attachment in three steps, sending the key only to TC", async () => {
     const upload = {
       attachment_id: "11111111-2222-4333-8444-555555555555",
-      job_id: "j1",
+      job_id: JOB,
       bucket: "job-documents",
       storage_path: "j1/c1/partner-api/11111111-2222-4333-8444-555555555555_site.png",
       upload_url: "https://storage.example.test/upload/sign/job-documents/x?token=abc",
@@ -216,7 +233,7 @@ describe("TcClient", () => {
       { status: 201, body: { id: upload.attachment_id, filename: "site.png" } },
     ]);
     const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
-    const record = await tc.uploadAttachment("j1", { filename: "site.png", content_type: "image/png", category: "SITE_PHOTO", bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]), is_public: false });
+    const record = await tc.uploadAttachment(JOB, { filename: "site.png", content_type: "image/png", category: "SITE_PHOTO", bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]), is_public: false });
     assert.equal(record.id, upload.attachment_id);
     // Step 1 refuses is_public (strict body), so it must not be sent there.
     assert.deepEqual(JSON.parse(calls[0]!.body!), { filename: "site.png", content_type: "image/png", category: "SITE_PHOTO", size_bytes: 4 });
@@ -224,20 +241,20 @@ describe("TcClient", () => {
     assert.equal(calls[1]!.url.host, "storage.example.test");
     assert.equal(calls[1]!.headers.get("content-type"), "image/png");
     assert.equal(calls[1]!.headers.get("authorization"), null, "the API key never goes to the storage URL");
-    assert.equal(calls[2]!.url.pathname.endsWith(`/v1/jobs/j1/attachments/${upload.attachment_id}/complete`), true);
+    assert.equal(calls[2]!.url.pathname.endsWith(`/v1/jobs/${JOB}/attachments/${upload.attachment_id}/complete`), true);
     assert.deepEqual(JSON.parse(calls[2]!.body!), { filename: "site.png", content_type: "image/png", size_bytes: 4, storage_path: upload.storage_path, category: "SITE_PHOTO", is_public: false });
   });
 
   it("sends is_public: true in step 3 when asked, and refuses an upload that does not choose", async () => {
-    const upload = { attachment_id: "11111111-2222-4333-8444-555555555555", job_id: "j1", bucket: "job-documents", storage_path: "p", upload_url: "https://storage.example.test/u", token: "t", expires_in: 7200, filename: "plan.pdf", content_type: "application/pdf", size_bytes: 4 };
+    const upload = { attachment_id: "11111111-2222-4333-8444-555555555555", job_id: JOB, bucket: "job-documents", storage_path: "p", upload_url: "https://storage.example.test/u", token: "t", expires_in: 7200, filename: "plan.pdf", content_type: "application/pdf", size_bytes: 4 };
     const { calls, fetchFn } = scripted([{ status: 201, body: upload }, { status: 200, body: {} }, { status: 201, body: { id: upload.attachment_id } }]);
     const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
-    await tc.uploadAttachment("j1", { filename: "plan.pdf", content_type: "application/pdf", bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]), is_public: true });
+    await tc.uploadAttachment(JOB, { filename: "plan.pdf", content_type: "application/pdf", bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]), is_public: true });
     assert.equal(JSON.parse(calls[2]!.body!).is_public, true);
 
     // A JavaScript caller (no type checking) that forgets the flag gets an error, not TC's public default.
     const forgetful = { filename: "invoice.pdf", content_type: "application/pdf", bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]) } as unknown as Parameters<TcClient["uploadAttachment"]>[1];
-    await assert.rejects(tc.uploadAttachment("j1", forgetful), TypeError);
+    await assert.rejects(tc.uploadAttachment(JOB, forgetful), TypeError);
     assert.equal(calls.length, 3, "nothing was sent for the upload that did not choose");
   });
 

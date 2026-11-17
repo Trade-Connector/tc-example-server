@@ -161,7 +161,7 @@ curl -X POST "$BASE/v1/jobs" \
     "trade_codes": ["ELECTRICAL"],
     "site": { "address": "12 Example St", "suburb": "Exampleton", "state": "NSW", "postcode": "2000" },
     "schedule": { "preferred_start_date": "2026-11-24", "time_window": "MORNING" },
-    "contacts": [{ "name": "Alex Example", "phone": "0400 000 000", "role": "SITE_OWNER" }],
+    "contacts": [{ "name": "Alex Example", "phone": "0491 570 006", "role": "SITE_OWNER" }],
     "publish": true
   }'
 ```

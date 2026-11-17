@@ -72,6 +72,19 @@ export class TcApiError extends Error {
   }
 }
 
+/**
+ * A value the client refuses before sending anything, for example a job id that is neither a
+ * UUID nor `ext:<reference>`. Nothing reached TC.
+ */
+export class TcInputError extends Error {
+  readonly code: "INVALID_JOB_ID" | "INVALID_SERIAL";
+  constructor(code: TcInputError["code"], message: string) {
+    super(message);
+    this.name = "TcInputError";
+    this.code = code;
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
