@@ -297,6 +297,8 @@ export class FakeTc {
       if (key) this.#idempotency.set(key, { body: text, jobId: job.id });
       this.writes.push({ route, jobId: job.id });
       this.#emit("job.created", job, { job_status: { from: null, to: job.status } });
+      // A create with a price may also send job.price_changed (from no total to the new one).
+      if (body.price) this.#setPrice(job, (body.price as { ex_gst_cents: number }).ex_gst_cents);
       return this.#json(201, job);
     }
 

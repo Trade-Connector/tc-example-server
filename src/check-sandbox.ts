@@ -76,7 +76,9 @@ async function main(): Promise<void> {
   const retryProbe = new RetryProbe();
   const listener = createWebhookServer({ config, store, retryProbe });
   const ownListener = await listen(listener, config.webhookPort, config.webhookHost);
-  const listenerUrl = `http://${urlHostFor(config.webhookHost)}:${config.webhookPort}${WEBHOOK_PATHS.sandbox}`;
+  const bound = listener.address();
+  const listenerPort = ownListener && typeof bound === "object" && bound ? bound.port : config.webhookPort;
+  const listenerUrl = `http://${urlHostFor(config.webhookHost)}:${listenerPort}${WEBHOOK_PATHS.sandbox}`;
 
   let events: CheckEventSource;
   let coverage: Coverage | null = null;
@@ -93,7 +95,7 @@ async function main(): Promise<void> {
   out(`Trade Connector sandbox check using ${keyPrefix(apiKey)} at ${config.baseUrl}`);
   out(
     ownListener
-      ? `Listening for webhooks on ${urlHostFor(config.webhookHost)}:${config.webhookPort} (npm start is not running). Your tunnel must point here.`
+      ? `Listening for webhooks on ${urlHostFor(config.webhookHost)}:${listenerPort} (npm start is not running). Your tunnel must point here.`
       : `npm start is running, so its webhook listener receives deliveries; this reads them from ${config.dataDir}/.`,
   );
   out("It takes a few minutes: TC sends each webhook within about a minute, and the check waits for every one.");

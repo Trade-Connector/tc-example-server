@@ -207,7 +207,7 @@ describe("npm run check:sandbox", () => {
     try {
       const result = await run("check-sandbox.ts", cwd, { TC_TEST_API_KEY: TEST_KEY, TC_BASE_URL: tc.url, WEBHOOK_PORT: "0", DATA_DIR: path.join(cwd, "data") });
       assert.equal(result.code, 1, result.stdout + result.stderr);
-      assert.match(result.stdout, /Listening for webhooks on 127\.0\.0\.1:0/);
+      assert.match(result.stdout, /Listening for webhooks on 127\.0\.0\.1:[1-9]\d*/, "the port it really bound");
       assert.match(result.stdout, /✕ API health/);
       assert.match(result.stdout, /Result: 1 passed · 0 need you · 1 failed · \d+ skipped/);
       assert.match(result.stdout, /tc_test_1a1a…/);

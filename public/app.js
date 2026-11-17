@@ -1195,6 +1195,10 @@ function renderCheckControls() {
   const controls = $("#check-controls");
   if (!controls) return;
   const c = state.check;
+  // Rebuilt only when something it shows has changed, so a click is never lost to a re-render.
+  const signature = JSON.stringify([state.env, c.running, c.retryAvailable, Boolean(c.report), c.viewingId, c.history]);
+  if (controls.dataset.signature === signature && controls.childElementCount) return;
+  controls.dataset.signature = signature;
   const items = [];
   if (state.env === "sandbox") {
     items.push(

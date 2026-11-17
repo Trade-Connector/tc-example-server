@@ -179,7 +179,7 @@ describe("sandbox check: a well-behaved sandbox", () => {
     }
     assert.equal(h.row("webhooks.a.matches_get").status, "pass");
     assert.equal(h.row("webhooks.b.matches_get").status, "pass");
-    assert.match(h.row("webhooks.unexpected").reason!, /^None/);
+    assert.match(h.row("webhooks.unexpected").reason!, /^None.*plus 1 extra job\.price_changed/);
   });
 
   it("cancels the second job free, and keeps the reason", () => {

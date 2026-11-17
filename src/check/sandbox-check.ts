@@ -833,6 +833,9 @@ class SandboxCheck {
       site: { address: "12 Example St", suburb: "Exampleton", state: "NSW", postcode: "2000", access_instructions: "Example data only." },
       schedule: { preferred_start_date: start, time_window: "MORNING" },
       contacts: [{ name: "Alex Example", phone: "0491 570 156", email: "alex@example.com", role: "SITE_OWNER" }],
+      // Job A gets its price by PATCH (so job.price_changed can be checked); job B is created
+      // published, and priced, as most integrations do.
+      ...(which === "B" ? { price: { ex_gst_cents: 150_000 } } : {}),
       publish,
     };
   }

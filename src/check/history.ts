@@ -4,6 +4,7 @@
 // The CLI and the console can both save here (the CLI while npm start is running, too), so every
 // save reads the file again first and changes only its own run.
 
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { readJsonFile, writeJsonFile } from "../store/json-file.ts";
 import { runSummary, type CheckRun, type CheckRunSummary } from "./types.ts";
@@ -16,14 +17,25 @@ interface PersistedRuns {
 
 export class CheckHistory {
   readonly file: string;
+  /** The console asks every second while a check runs: read the file again only when it changed. */
+  #cache: { mtimeMs: number; size: number; runs: CheckRun[] } | null = null;
 
   constructor(dataDir: string) {
     this.file = path.join(dataDir, "sandbox-check-runs.json");
   }
 
   async list(): Promise<CheckRun[]> {
+    let info;
+    try {
+      info = await stat(this.file);
+    } catch {
+      return [];
+    }
+    if (this.#cache && this.#cache.mtimeMs === info.mtimeMs && this.#cache.size === info.size) return structuredClone(this.#cache.runs);
     const persisted = await readJsonFile<PersistedRuns>(this.file, { runs: [] });
-    return Array.isArray(persisted.runs) ? persisted.runs : [];
+    const runs = Array.isArray(persisted.runs) ? persisted.runs : [];
+    this.#cache = { mtimeMs: info.mtimeMs, size: info.size, runs };
+    return structuredClone(runs);
   }
 
   async summaries(): Promise<CheckRunSummary[]> {

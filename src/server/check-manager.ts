@@ -87,6 +87,13 @@ export class CheckManager {
         log.info("Sandbox check finished", { run: done.id, ...done.summary });
         return done;
       })
+      .catch((error: unknown) => {
+        // The check catches its own errors; this is a last guard, so a bug never crashes the server.
+        log.error("The sandbox check failed", { error: (error as Error)?.message ?? String(error) });
+        run.state = "finished";
+        run.finished_at ??= new Date().toISOString();
+        return run;
+      })
       .finally(() => {
         this.#running = null;
         this.#save(run);
