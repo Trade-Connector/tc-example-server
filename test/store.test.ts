@@ -65,6 +65,44 @@ describe("EventStore", () => {
     assert.equal(reopened.getSnapshot("sandbox", job.id)?.job.status, "SCHEDULED");
   });
 
+  it("never persists an unfinished delivery as seen, even when another delivery is written meanwhile", async () => {
+    const storeDir = path.join(dir, "concurrent-fail");
+    const store = await EventStore.open(storeDir);
+    const job = sampleJob({ status: "SCHEDULED", updated_at: "2026-11-17T04:00:00.000Z" });
+    const a = { environment: "sandbox" as const, webhookId: "evt_A", ...envelope("evt_A", "job.scheduled", job) };
+    // C writes no snapshot (webhook.test), so its event write succeeds while A's snapshot write fails.
+    const c = { environment: "sandbox" as const, webhookId: "evt_C", ...envelope("evt_C", "webhook.test", null) };
+
+    const snapshotFile = path.join(storeDir, "job-snapshots.json");
+    await mkdir(snapshotFile, { recursive: true });
+    const [resultA, resultC] = await Promise.allSettled([store.recordVerified(a), store.recordVerified(c)]);
+    assert.equal(resultA.status, "rejected");
+    assert.equal(resultC.status, "fulfilled");
+    await rm(snapshotFile, { recursive: true });
+    await flushJsonWrites();
+
+    const persisted = JSON.parse(await readFile(path.join(storeDir, "webhook-events.json"), "utf8"));
+    assert.ok(!persisted.seen_ids.includes("sandbox:evt_A"), "A must not be saved as seen");
+
+    // Restart, then TC's retry of A: processed in full, and the update survives another restart.
+    const restarted = await EventStore.open(storeDir);
+    const retry = await restarted.recordVerified(a);
+    assert.equal(retry.flags.duplicate, false);
+    await flushJsonWrites();
+    const again = await EventStore.open(storeDir);
+    assert.equal(again.getSnapshot("sandbox", job.id)?.job.status, "SCHEDULED");
+  });
+
+  it("waits for an in-flight copy of the same webhook-id instead of racing it", async () => {
+    const store = await EventStore.open(path.join(dir, "same-id-concurrent"));
+    const job = sampleJob({ status: "ASSIGNED", updated_at: "2026-11-17T05:00:00.000Z" });
+    const d = { environment: "sandbox" as const, webhookId: "evt_twice", ...envelope("evt_twice", "job.assigned", job) };
+    const [first, second] = await Promise.all([store.recordVerified(d), store.recordVerified(d)]);
+    assert.equal(first.flags.duplicate, false);
+    assert.equal(second.flags.duplicate, true);
+    assert.equal(store.getSnapshot("sandbox", job.id)?.job.status, "ASSIGNED");
+  });
+
   it("keeps no ghost entry when the event-log write fails: TC's retry is the one recorded", async () => {
     const storeDir = path.join(dir, "event-write-fails");
     const store = await EventStore.open(storeDir);

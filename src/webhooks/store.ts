@@ -117,8 +117,11 @@ export class EventStore {
   #events: StoredEvent[] = [];
   /** Refused deliveries, oldest first. Shares the seq counter with #events. */
   #rejections: StoredEvent[] = [];
-  /** `${environment}:${webhook-id}` of every processed delivery. */
+  /** `${environment}:${webhook-id}` of every delivery whose writes have FINISHED. Persisted. */
   #seen = new Set<string>();
+  /** Deliveries being written right now. Never persisted, so a restart can't mistake a delivery
+   *  that never finished for a done one. Settles (never rejects) when that attempt ends. */
+  #inFlight = new Map<string, Promise<void>>();
   #snapshots: Record<string, JobSnapshot> = {};
   #listeners = new Set<(event: StoredEvent) => void>();
 
@@ -168,6 +171,11 @@ export class EventStore {
 
     const flags: EventFlags = { ...NO_FLAGS };
     const seenKey = `${environment}:${webhookId}`;
+    // If the same webhook-id is being written right now (TC retried or replayed it mid-write), wait for
+    // that attempt: if it finished, this one is a duplicate; if it failed, this one does the work.
+    for (let pending = this.#inFlight.get(seenKey); pending; pending = this.#inFlight.get(seenKey)) {
+      await pending;
+    }
     flags.duplicate = this.#seen.has(seenKey);
     flags.unknown_type = !isKnownEventType(type);
     flags.test_event = type === "webhook.test" || job?.id === TEST_EVENT_JOB_ID;
@@ -190,8 +198,9 @@ export class EventStore {
     // Processing = updating the job snapshot. Only for a first delivery of a known event type
     // that carries a real job from the right environment.
     let snapshotSaved: Promise<void> = Promise.resolve();
+    let settle: () => void = () => {};
     if (!flags.duplicate) {
-      this.#seen.add(seenKey);
+      this.#inFlight.set(seenKey, new Promise<void>((resolve) => (settle = resolve)));
       const processable = !flags.unknown_type && !flags.environment_mismatch && !flags.test_event;
       if (job && processable && typeof job.id === "string") {
         const applied = this.#applySnapshot(environment, job, type ?? "unknown", webhookId);
@@ -219,16 +228,20 @@ export class EventStore {
       flags,
       raw_body: input.rawBody,
     };
-    // Resolves once the snapshot change (if any) and then the event have been written.
-    // If either write fails, forget the webhook-id again: the caller answers 500, TC retries the
-    // same webhook-id, and that retry must be processed in full, not waved through as a duplicate.
-    // (Mark-as-seen-then-process without undoing on failure silently loses events.)
+    // Write the snapshot change (if any), then the event. The webhook-id counts as "seen" only once
+    // both writes have succeeded, and it is persisted with this delivery's own event write, never by
+    // another delivery's write while this one is still in flight. If a write fails, the caller answers
+    // 500 and TC's retry is processed in full. (Marking an id seen before its work is saved, and
+    // persisting that, silently loses the update after a restart.)
     try {
       await snapshotSaved;
-      await this.#append(event);
-    } catch (error) {
-      if (!flags.duplicate) this.#seen.delete(seenKey);
-      throw error;
+      await this.#append(event, flags.duplicate ? null : seenKey);
+      if (!flags.duplicate) this.#seen.add(seenKey);
+    } finally {
+      if (!flags.duplicate) {
+        this.#inFlight.delete(seenKey);
+        settle();
+      }
     }
     return event;
   }
@@ -330,7 +343,8 @@ export class EventStore {
     }
   }
 
-  async #append(event: StoredEvent): Promise<void> {
+  /** `ownSeenKey`: this delivery's id, saved with its own event so a restart knows it is done. */
+  async #append(event: StoredEvent, ownSeenKey: string | null = null): Promise<void> {
     this.#events.push(event);
     if (this.#events.length > MAX_EVENTS) this.#events.splice(0, this.#events.length - MAX_EVENTS);
     if (this.#seen.size > MAX_SEEN_IDS) {
@@ -340,7 +354,7 @@ export class EventStore {
       await writeJsonFile(this.#eventsFile, {
         next_seq: this.#nextSeq,
         events: this.#events,
-        seen_ids: [...this.#seen],
+        seen_ids: ownSeenKey ? [...this.#seen, ownSeenKey] : [...this.#seen],
       } satisfies PersistedEvents);
     } catch (error) {
       // The caller answers 500 and TC retries this delivery, so don't keep (or show) this attempt:
