@@ -36,6 +36,10 @@ For how the API itself works (keys, errors, statuses, cancellation, webhooks), r
 
    Put the key in `TC_TEST_API_KEY`. Leave the live settings empty.
 
+   `TC_BASE_URL` is already set to the Partner API address,
+   `https://teclldqbxvjjjcuyhawv.supabase.co/functions/v1/partner-api`. TC may move to a custom domain later
+   and will announce it; when that happens, change only this setting.
+
 3. **Install and start.**
 
    ```sh

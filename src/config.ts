@@ -8,7 +8,8 @@
 
 import { decodeWebhookSecret } from "./webhooks/verify.ts";
 
-export const DEFAULT_BASE_URL = "https://api.tradeconnector.com.au/functions/v1/partner-api";
+// TC may move the API to a custom domain later and will announce it; keep the URL in config (TC_BASE_URL).
+export const DEFAULT_BASE_URL = "https://teclldqbxvjjjcuyhawv.supabase.co/functions/v1/partner-api";
 const API_KEY_FORMAT = /^tc_(live|test)_[a-f0-9]{48}$/;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 

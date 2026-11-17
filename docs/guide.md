@@ -34,9 +34,9 @@ The code in this repository is a working example of everything here.
 - Everything else about the job (finding and vetting installers, scheduling, approvals, payment) happens in TC.
   Your staff still use the TC web app for decisions such as approving quotes and variations.
 
-Base URL: TC gives you the address. The example configuration uses
-`https://api.tradeconnector.com.au/functions/v1/partner-api`; every path below is added to it, for example
-`GET {base}/v1/health`.
+Base URL: `https://teclldqbxvjjjcuyhawv.supabase.co/functions/v1/partner-api`. Every path below is added to it, for example
+`GET {base}/v1/health`. TC may move the API to a custom domain later and will announce it, so keep the base URL
+in your configuration, not in code.
 
 ## Keys, scopes and environments
 
@@ -485,7 +485,7 @@ These stay in the TC web app:
 `GET /v1/openapi.json` is useful, but at the time of writing TC's copy differs from the live API. TC is
 correcting it. Until then, follow this guide:
 
-- The server URL in the document is not live yet. Use the base URL TC gives you.
+- The `servers` URL in the document is not the address to call. Use the base URL [above](#how-it-fits-together).
 - The job status list includes `EXPIRED`, which is never used, and lacks `PENDING_CUSTOMER_SIG`, which is.
 - There is no webhooks section. Webhooks are described [above](#webhooks).
 - The sandbox simulate body is `{"status": "..."}`. Older TC material shows `{"action": "..."}`; that is wrong.

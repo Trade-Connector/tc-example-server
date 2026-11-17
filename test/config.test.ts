@@ -1,10 +1,36 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { ConfigError, DEFAULT_BASE_URL, loadConfig } from "../src/config.ts";
 import { makeSecret } from "./helpers/tc-signer.ts";
 
 const TEST_KEY = `tc_test_${"1a".repeat(24)}`;
 const LIVE_KEY = `tc_live_${"2b".repeat(24)}`;
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// The Partner API's address (TC's decision, 17 Nov 2026). The api.tradeconnector.com.au host
+// in TC's OpenAPI `servers` entry does not resolve.
+const TC_PARTNER_API = "https://teclldqbxvjjjcuyhawv.supabase.co/functions/v1/partner-api";
+
+describe("base URL", () => {
+  it("defaults to the Partner API's real address", () => {
+    assert.equal(DEFAULT_BASE_URL, TC_PARTNER_API);
+    assert.equal(loadConfig({}).baseUrl, TC_PARTNER_API);
+  });
+
+  it("is the same in .env.example, the guide and the README", async () => {
+    const example = await readFile(path.join(root, ".env.example"), "utf8");
+    assert.match(example, /^TC_BASE_URL=(.*)$/m);
+    assert.equal(/^TC_BASE_URL=(.*)$/m.exec(example)![1], TC_PARTNER_API);
+    for (const file of ["docs/guide.md", "README.md"]) {
+      const text = await readFile(path.join(root, file), "utf8");
+      assert.ok(text.includes(TC_PARTNER_API), `${file} names the base URL`);
+      assert.ok(!text.includes("api.tradeconnector.com.au"), `${file} does not name the unresolvable host`);
+    }
+  });
+});
 
 describe("loadConfig", () => {
   it("has safe defaults: sandbox base URL config, loopback console, live off", () => {

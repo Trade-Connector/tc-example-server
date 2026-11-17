@@ -74,7 +74,10 @@ export interface ResponseInfo {
 }
 
 export interface TcClientOptions {
-  /** e.g. https://api.tradeconnector.com.au/functions/v1/partner-api (TC tells you the URL). */
+  /**
+   * https://teclldqbxvjjjcuyhawv.supabase.co/functions/v1/partner-api today. TC may move to a custom domain later and
+   * will announce it, so read this from config rather than hard-coding it.
+   */
   baseUrl: string;
   /** tc_test_… (sandbox) or tc_live_… (production). Only the open routes (health, openapi) work without one. */
   apiKey?: string | null;
