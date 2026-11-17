@@ -1,17 +1,16 @@
-// Signs test webhook deliveries the way Trade Connector's webhook dispatcher does.
+// Signs test webhook deliveries exactly as Trade Connector signs them, so the verifier is tested
+// against TC's real scheme (Standard Webhooks). The scheme fixes the steps; this file carries
+// them out on its own path, separate from src/webhooks/verify.ts: WebCrypto with atob/btoa (TC
+// runs on Deno), where verify.ts uses node:crypto. If the two ever disagreed, the tests would fail.
 //
-// Written fresh from TC's documented and observed behaviour (not copied). It deliberately uses a
-// different code path from src/webhooks/verify.ts — WebCrypto HMAC with atob/btoa, as TC runs on
-// Deno — so if the verifier and TC's real signing ever disagreed, these tests would fail.
-//
-//   secret         "whsec_" + base64 key; key bytes = atob(base64)
-//   signed string  `${webhookId}.${timestampSeconds}.${body}`, UTF-8
-//   signature      "v1," + btoa(HMAC-SHA256(key, signed string))
-//   rotation       while the previous secret is unexpired, a second signature made with it is
-//                  appended after one space (unless identical)
-//   body           JSON.stringify(envelope), envelope = { id, type, created_at, api_version,
-//                  data: { job: { ...job, client_status_label }, changes } }, with any `replayed`
-//                  field removed from the job
+// The scheme, as TC applies it:
+//   secret        "whsec_" + base64; the HMAC key is the decoded bytes
+//   signed text   `${webhook-id}.${webhook-timestamp}.${raw body}`, as UTF-8
+//   signature     "v1," + base64(HMAC-SHA256(key, signed text))
+//   rotation      while the previous secret is unexpired, its signature follows the current one,
+//                 separated by one space (and is left out when the two are identical)
+//   body          JSON.stringify of { id, type, created_at, api_version, data: { job, changes } },
+//                 where job is the job without `replayed`, plus client_status_label
 
 import { randomBytes } from "node:crypto";
 import type { Job } from "../../src/tc/types.ts";
@@ -20,19 +19,32 @@ export function makeSecret(): string {
   return `whsec_${randomBytes(32).toString("base64")}`;
 }
 
-function keyBytes(secret: string): Uint8Array {
-  const binary = atob(secret.trim().slice("whsec_".length));
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+const SECRET_PREFIX = "whsec_";
+const encoder = new TextEncoder();
+
+async function hmacSha256Base64(secret: string, text: string): Promise<string> {
+  const decoded = atob(secret.trim().slice(SECRET_PREFIX.length));
+  const keyBytes = new Uint8Array(decoded.length);
+  for (let i = 0; i < decoded.length; i++) keyBytes[i] = decoded.charCodeAt(i);
+  const key = await crypto.subtle.importKey("raw", keyBytes, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const mac = await crypto.subtle.sign("HMAC", key, encoder.encode(text));
+  return btoa(String.fromCharCode(...new Uint8Array(mac)));
 }
 
+/** One `v1,` signature entry. */
 export async function tcSignature(secret: string, webhookId: string, timestamp: number | string, body: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", keyBytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${webhookId}.${timestamp}.${body}`)));
-  let binary = "";
-  for (const byte of mac) binary += String.fromCharCode(byte);
-  return `v1,${btoa(binary)}`;
+  return `v1,${await hmacSha256Base64(secret, `${webhookId}.${timestamp}.${body}`)}`;
 }
 
+/** The secrets an endpoint signs with at `at`: the current one, and the previous one in its window. */
+function signingSecrets(params: { secret: string; previousSecret?: string; previousExpiresAt?: Date }, at: Date): string[] {
+  const secrets = [params.secret];
+  const previousLive = params.previousExpiresAt !== undefined && params.previousExpiresAt.getTime() > at.getTime();
+  if (params.previousSecret && previousLive) secrets.push(params.previousSecret);
+  return secrets;
+}
+
+/** The headers of one delivery, as TC sends them. */
 export async function tcHeaders(params: {
   webhookId: string;
   body: string;
@@ -41,22 +53,27 @@ export async function tcHeaders(params: {
   previousExpiresAt?: Date;
   now?: Date;
 }): Promise<Record<string, string>> {
-  const now = params.now ?? new Date();
-  const timestamp = Math.floor(now.getTime() / 1000);
-  const signatures = [await tcSignature(params.secret, params.webhookId, timestamp, params.body)];
-  if (params.previousSecret && params.previousExpiresAt && params.previousExpiresAt.getTime() > now.getTime()) {
-    const previous = await tcSignature(params.previousSecret, params.webhookId, timestamp, params.body);
-    if (previous !== signatures[0]) signatures.push(previous);
-  }
+  const sentAt = params.now ?? new Date();
+  const timestamp = Math.floor(sentAt.getTime() / 1000);
+  const entries = await Promise.all(signingSecrets(params, sentAt).map((s) => tcSignature(s, params.webhookId, timestamp, params.body)));
   return {
     "webhook-id": params.webhookId,
     "webhook-timestamp": String(timestamp),
-    "webhook-signature": signatures.join(" "),
+    "webhook-signature": [...new Set(entries)].join(" "),
     "user-agent": "TradeConnector-Webhooks/1.0",
     "content-type": "application/json",
   };
 }
 
+/** The job as a webhook carries it: no `replayed`, and the endpoint's status label (or null). */
+function webhookJob(job: Partial<Job>, statusLabel: string | null | undefined): Record<string, unknown> {
+  const carried: Record<string, unknown> = { ...job };
+  delete carried.replayed;
+  carried.client_status_label = statusLabel ?? null;
+  return carried;
+}
+
+/** A delivery body (parse-ready object; JSON.stringify it to get the bytes TC signs). */
 export function tcEnvelope(params: {
   eventId: string;
   type: string;
@@ -66,17 +83,15 @@ export function tcEnvelope(params: {
   apiVersion?: string;
   statusLabel?: string | null;
 }): Record<string, unknown> {
-  let job: Record<string, unknown> | null = null;
-  if (params.job) {
-    const { replayed: _replayed, ...rest } = params.job;
-    job = { ...rest, client_status_label: params.statusLabel ?? null };
-  }
   return {
     id: params.eventId,
     type: params.type,
     created_at: params.createdAt ?? new Date().toISOString(),
     api_version: params.apiVersion ?? "2026-10-01",
-    data: { job, changes: params.changes ?? {} },
+    data: {
+      job: params.job ? webhookJob(params.job, params.statusLabel) : null,
+      changes: params.changes ?? {},
+    },
   };
 }
 
