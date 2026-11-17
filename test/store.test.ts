@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -41,6 +41,28 @@ describe("EventStore", () => {
     assert.equal(repeat.flags.duplicate, true);
     assert.equal(store.getSnapshot("sandbox", job.id)?.job.status, "OPEN");
     assert.equal(store.listEvents().length, 2);
+  });
+
+  it("processes TC's retry in full after a failed write (no lost update, not waved through as a duplicate)", async () => {
+    const storeDir = path.join(dir, "write-fails");
+    const store = await EventStore.open(storeDir);
+    const job = sampleJob({ status: "SCHEDULED", updated_at: "2026-11-17T02:00:00.000Z" });
+    const delivery = { environment: "sandbox" as const, webhookId: "evt_retry", ...envelope("evt_retry", "job.scheduled", job) };
+
+    // Force the snapshot write to fail once: a directory where the snapshot file goes.
+    const snapshotFile = path.join(storeDir, "job-snapshots.json");
+    await mkdir(snapshotFile, { recursive: true });
+    await assert.rejects(store.recordVerified(delivery));
+    await rm(snapshotFile, { recursive: true });
+
+    // TC retries the same webhook-id: it must be processed, not flagged as a duplicate.
+    const retry = await store.recordVerified(delivery);
+    assert.equal(retry.flags.duplicate, false);
+
+    // And the update must survive a restart.
+    await flushJsonWrites();
+    const reopened = await EventStore.open(storeDir);
+    assert.equal(reopened.getSnapshot("sandbox", job.id)?.job.status, "SCHEDULED");
   });
 
   it("does not let an older job overwrite a newer one (unordered delivery)", async () => {

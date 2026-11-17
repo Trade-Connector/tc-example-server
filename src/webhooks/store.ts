@@ -219,8 +219,17 @@ export class EventStore {
       flags,
       raw_body: input.rawBody,
     };
-    // Resolves once the event (and any snapshot change) is on disk.
-    await Promise.all([this.#append(event), snapshotSaved]);
+    // Resolves once the snapshot change (if any) and then the event have been written.
+    // If either write fails, forget the webhook-id again: the caller answers 500, TC retries the
+    // same webhook-id, and that retry must be processed in full, not waved through as a duplicate.
+    // (Mark-as-seen-then-process without undoing on failure silently loses events.)
+    try {
+      await snapshotSaved;
+      await this.#append(event);
+    } catch (error) {
+      if (!flags.duplicate) this.#seen.delete(seenKey);
+      throw error;
+    }
     return event;
   }
 
