@@ -244,16 +244,16 @@ New statuses may appear. Store unknown values as they are and do not fail on the
 
 `POST /v1/jobs/{id}/cancel` (`jobs:cancel`), with an optional body `{"reason": "..."}` (up to 2,000 characters).
 
-This uses the same rules as cancelling on the TC website, and **any fee is charged automatically**:
+This uses the same rules as cancelling in the TC web app, and **any fee is charged automatically**:
 
-- **No fee** before an installer is assigned, or while the booked date (or, failing that, the preferred start
-  date) is 48 hours or more away, or when there is no date at all.
-- **$200 + GST** (a late cancellation) inside 48 hours of the booked date.
-- **$250 + GST** (a call-out) once the installer has started work on site.
+- Cancelling before an installer is assigned is free.
+- After that, a fee may apply, depending on how close the booked date is and whether work has started. The
+  amounts and timings are set out in your company's cancellation terms with Trade Connector; ask TC if you
+  don't have them.
 - **Sandbox cancellations are always free.**
 
-These amounts and the 48-hour window are TC's current defaults; TC can change them. `WORK_COMPLETE`, `PAID`,
-`CANCELLED` and `DISPUTED` jobs cannot be cancelled (`409 JOB_LOCKED`).
+`WORK_COMPLETE`, `PAID`, `CANCELLED` and `DISPUTED` jobs cannot be cancelled (`409 JOB_LOCKED`). Always read the
+response: it says whether a fee was charged and how much.
 
 The response tells you what happened:
 

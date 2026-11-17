@@ -698,17 +698,12 @@ function fileToBase64(file) {
   });
 }
 
-/** What TC is likely to charge, from its published rules. TC decides; the response says what it did. */
+/** A rough hint only. TC decides any fee under the company's terms; the cancel response says what it charged. */
 function feeEstimate(job) {
   if (job.is_sandbox) return "Sandbox cancellations are always free.";
   if (DO_NOT_CANCEL.includes(job.status)) return "Do not cancel: the work is done and awaiting the customer's sign-off. TC would currently cancel it with no fee (see the guide).";
   if (["DRAFT", "OPEN", "OFFERED"].includes(job.status) || !job.assigned_installer) return "Expected: no fee (no installer is assigned yet).";
-  if (job.status === "IN_PROGRESS") return "Expected: a call-out fee ($250 + GST by default) if the installer has started on site.";
-  const target = job.schedule?.scheduled_date ?? job.schedule?.preferred_start_date;
-  if (!target) return "Expected: no fee (no booked date).";
-  const hours = (new Date(target).getTime() - Date.now()) / 3600000;
-  if (hours < 48 && hours > -24) return `Expected: a late cancellation fee ($200 + GST by default): the booked date is ${Math.round(hours)} hours away.`;
-  return "Expected: no fee (the booked date is 48 hours or more away).";
+  return "A fee may apply under your company's cancellation terms with Trade Connector. The response shows what was charged.";
 }
 
 function cancelCard(job) {
@@ -723,10 +718,9 @@ function cancelCard(job) {
       ? "Warning: this job's work is done and awaiting the customer's sign-off. TC accepts this cancel today, but integrators should not send it (see the guide)."
       : "Disabled: the work is done and awaiting the customer's sign-off. TC would cancel it with no fee; do not cancel through the API (see the guide)." }) : null,
     h("ul", { class: "fee-rules" },
-      h("li", { text: "No fee before an installer is assigned, or while the booked date is 48 hours or more away." }),
-      h("li", { text: "$200 + GST inside 48 hours of the booked date." }),
-      h("li", { text: "$250 + GST call-out once the installer has started on site." }),
-      h("li", { text: "Sandbox jobs: always free. Amounts are TC's defaults." })),
+      h("li", { text: "Free before an installer is assigned." }),
+      h("li", { text: "After that, a fee may apply under your company's cancellation terms with Trade Connector." }),
+      h("li", { text: "Sandbox jobs: always free." })),
     h("p", { class: "hint", text: estimate }),
     reason,
     h("div", { class: "actions" }, h("button", {

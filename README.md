@@ -94,8 +94,8 @@ to TC support. A `403 SCOPE_FORBIDDEN` on reference data means the key needs `re
 
 ## Going live
 
-Live mode talks to production. Live jobs reach real installers, and cancelling a booked job can cost money
-($200 + GST inside 48 hours of the booked date, $250 + GST once work has started; see the
+Live mode talks to production. Live jobs reach real installers, and cancelling a job once an installer is
+assigned can incur a fee under your company's cancellation terms with Trade Connector (see the
 [guide](docs/guide.md#cancelling-a-job)).
 
 To make live mode available:
