@@ -268,10 +268,24 @@ Three steps (`attachments:write`). Allowed types: PDF, JPEG, PNG, HEIC and WebP,
 2. `PUT` the file bytes to `upload_url`, with the same `Content-Type`, within 2 hours. This URL is a storage
    address, not the API: do not send your API key to it.
 3. `POST /v1/jobs/{id}/attachments/{attachment_id}/complete` with the same `filename`, `content_type` and
-   `size_bytes` (and optionally `storage_path`, `category`, `title`). TC re-checks the stored file's type, size
-   and file signature. On a mismatch the file is deleted and you get `422 VALIDATION_ERROR`.
+   `size_bytes` (and optionally `storage_path`, `category`, `title` and `is_public`). TC re-checks the stored
+   file's type, size and file signature. On a mismatch the file is deleted and you get `422 VALIDATION_ERROR`.
 
 Not allowed on `CANCELLED` or `PAID` jobs (`409 JOB_LOCKED`). Listing or downloading attachments is not in v1.
+
+### Who can see a file: `is_public`
+
+`is_public` goes in step 3 only (step 1 refuses it with `400 VALIDATION_ERROR`). **If you leave it out, TC makes
+the file public.** The v1 API cannot change it afterwards.
+
+| `is_public` | Who can open the file in TC |
+| --- | --- |
+| `false` | Your company's TC users, the installer assigned to the job, and TC staff. |
+| `true` (TC's default) | The same, plus installers who can see the job before one is assigned: while it is `OPEN`, trade companies that can find it on TC (in its area and trade) or were invited to quote; and, until an installer is assigned, companies that have quoted on it. Never on a `DRAFT` job, and never on a sandbox job. |
+
+So send `"is_public": false` for anything with customer details, prices or terms (invoices, contracts, signed
+forms), and `true` only for what installers need in order to quote, such as site photos and plans. This
+repository's `uploadAttachment()` helper and the console both make you choose every time.
 
 ## Reference data
 

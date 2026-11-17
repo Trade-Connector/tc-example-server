@@ -286,6 +286,11 @@ route(
     if (bytes.length === 0 || bytes.length > MAX_ATTACHMENT_BYTES) {
       throw new ConsoleError(400, "BAD_REQUEST", "Files must be between 1 byte and 25 MB");
     }
+    // Who can see the file must be chosen: TC makes it public when is_public is left out.
+    const isPublic = req.body.is_public;
+    if (typeof isPublic !== "boolean") {
+      throw new ConsoleError(400, "BAD_REQUEST", "is_public must be true or false: choose who can see the file");
+    }
     authorize(ctx, req, call, "upload_attachment", req.params[0]!);
     const category = str(req.body.category) as AttachmentCategory | undefined;
     const title = str(req.body.title);
@@ -295,6 +300,7 @@ route(
       bytes: new Uint8Array(bytes),
       ...(category ? { category } : {}),
       ...(title ? { title } : {}),
+      is_public: isPublic,
     });
   },
   { largeBody: true },

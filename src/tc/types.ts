@@ -298,6 +298,7 @@ export interface JobNote {
   created_at: string;
 }
 
+/** Step 1. Note: no is_public here. TC refuses it in step 1 (400); it belongs to step 3. */
 export interface CreateAttachmentRequest {
   filename: string; // no path separators or ".."
   content_type: AttachmentContentType;
@@ -328,7 +329,23 @@ export interface CompleteAttachmentRequest {
   storage_path?: string;
   category?: AttachmentCategory;
   title?: string;
+  /**
+   * Who can see the file. LEFT OUT, TC MAKES IT PUBLIC (true).
+   * - false: your company, the job's assigned installer and TC staff.
+   * - true: also installers who can see the job before one is assigned (see docs/guide.md).
+   * The v1 API cannot change it afterwards.
+   */
   is_public?: boolean;
+}
+
+/** Input for TcClient.uploadAttachment(): the file, its details, and an explicit visibility. */
+export interface UploadAttachmentInput extends Omit<CreateAttachmentRequest, "size_bytes"> {
+  bytes: Uint8Array;
+  /**
+   * Required here, although TC's default is true (public): the helper makes you choose. Use
+   * false for anything with customer details, prices or contracts. See CompleteAttachmentRequest.
+   */
+  is_public: boolean;
 }
 
 export interface AttachmentRecord {

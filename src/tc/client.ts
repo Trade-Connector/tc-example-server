@@ -34,6 +34,7 @@ import type {
   SimulateTarget,
   TradeType,
   UpdateJobRequest,
+  UploadAttachmentInput,
   UpsertInstallRequest,
 } from "./types.ts";
 
@@ -331,7 +332,10 @@ export class TcClient {
     }
   }
 
-  /** Step 3: tell TC the upload is done. TC re-checks the file's type, size and signature. */
+  /**
+   * Step 3: tell TC the upload is done. TC re-checks the file's type, size and signature.
+   * This is where is_public goes, and TC makes the file PUBLIC when it is left out.
+   */
   completeAttachmentUpload(
     id: string,
     attachmentId: string,
@@ -345,12 +349,16 @@ export class TcClient {
     });
   }
 
-  /** All three steps in one call. */
-  async uploadAttachment(
-    id: string,
-    file: Omit<CreateAttachmentRequest, "size_bytes"> & { bytes: Uint8Array },
-  ): Promise<AttachmentRecord> {
-    const { bytes, ...meta } = file;
+  /**
+   * All three steps in one call. `is_public` is required: TC's own default is public, so a
+   * forgotten flag would show an invoice or contract to installers. Pass false unless installers
+   * need the file to quote (site photos, plans).
+   */
+  async uploadAttachment(id: string, file: UploadAttachmentInput): Promise<AttachmentRecord> {
+    const { bytes, is_public: isPublic, ...meta } = file;
+    if (typeof isPublic !== "boolean") {
+      throw new TypeError("uploadAttachment: is_public must be true or false (TC makes files public when it is left out)");
+    }
     const upload = await this.createAttachmentUpload(id, { ...meta, size_bytes: bytes.byteLength });
     await this.uploadAttachmentBytes(upload, bytes);
     return this.completeAttachmentUpload(id, upload.attachment_id, {
@@ -360,6 +368,7 @@ export class TcClient {
       storage_path: upload.storage_path,
       ...(meta.category ? { category: meta.category } : {}),
       ...(meta.title ? { title: meta.title } : {}),
+      is_public: isPublic,
     });
   }
 

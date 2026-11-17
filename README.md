@@ -86,7 +86,7 @@ to TC support. A `403 SCOPE_FORBIDDEN` on reference data means the key needs `re
 | --- | --- |
 | Header | Switch Sandbox / Live, see the key prefix, base URL and API health, and the webhook URLs to paste into TC. |
 | Jobs | List with status and `updated_since` filters, look up by your own reference (`ext:`), load more (keyset pagination), create jobs as draft or published with an `Idempotency-Key`. |
-| Job detail | Summary and raw JSON, edit (disabled with the reason once TC would answer `JOB_LOCKED`), publish, add a note, upload an attachment (all three steps), cancel with the fee rules shown first and TC's fee fields after, and one button per sandbox simulate step. |
+| Job detail | Summary and raw JSON, edit (disabled with the reason once TC would answer `JOB_LOCKED`), publish, add a note, upload an attachment (all three steps, choosing who can see it), cancel with the fee rules shown first and TC's fee fields after, and one button per sandbox simulate step. |
 | Webhooks | A live feed of every delivery and a timeline per job: type, environment, signature check, and duplicate or out-of-order flags, with the raw payload. |
 | Reference data | Job types, trade types and accreditations. |
 | Installs | For manufacturers, production keys only: list, look up and register installs. |

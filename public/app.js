@@ -651,6 +651,10 @@ function attachmentCard(job) {
   const file = h("input", { type: "file", accept: ".pdf,.jpg,.jpeg,.png,.heic,.webp" });
   const category = h("select", {}, h("option", { value: "", text: "(no category)" }), ...CATEGORIES.map((c) => h("option", { text: c })));
   const title = h("input", { placeholder: "Title (optional)" });
+  // Always sent explicitly: TC makes a file PUBLIC when is_public is left out.
+  const visibility = h("select", {},
+    h("option", { value: "false", text: "Private: your company, the assigned installer and TC staff", selected: true }),
+    h("option", { value: "true", text: "Public: also installers who can see the job before one is assigned" }));
   const button = h("button", {
     type: "button", text: "Upload (3 steps)", disabled: blocked,
     onclick: async () => {
@@ -664,15 +668,20 @@ function attachmentCard(job) {
       const body = { filename: chosen.name.replace(/[\\/]/g, "_"), content_type: contentType, data_base64: dataBase64 };
       if (category.value) body.category = category.value;
       if (title.value.trim()) body.title = title.value.trim();
+      body.is_public = visibility.value === "true";
+      const seenBy = body.is_public ? "PUBLIC (installers who can see the job may open it)" : "private";
       jobAction("Upload attachment", "POST", jobPath(job, "/attachments"), body,
-        { action: "upload_attachment", target: job.id, summary: `Attach “${chosen.name}” to the LIVE job “${job.title}”.` },
-        (record) => dl([["attachment id", record.id], ["file", record.filename], ["type", record.mime_type], ["size", `${record.file_size} bytes`]], ""));
+        { action: "upload_attachment", target: job.id, summary: `Attach “${chosen.name}”, ${seenBy}, to the LIVE job “${job.title}”.` },
+        (record) => dl([["attachment id", record.id], ["file", record.filename], ["type", record.mime_type], ["size", `${record.file_size} bytes`],
+          ["visible to", record.is_public ? "public: also installers who can see the job before one is assigned" : "private: your company, the assigned installer and TC staff"]], ""));
     },
   });
   return h("div", { class: "card" }, h("h3", { text: "Upload an attachment" }),
     blocked ? h("p", { class: "reason", text: `Disabled: TC refuses attachments on ${job.status} jobs (409 JOB_LOCKED).` }) : null,
     h("p", { class: "hint", text: "1. ask TC for a signed upload URL · 2. PUT the bytes to it · 3. tell TC it is done (TC re-checks type, size and file signature)." }),
-    h("div", { class: "form-grid" }, h("label", { class: "wide" }, "File", file), h("label", {}, "Category", category), h("label", {}, "Title", title)),
+    h("div", { class: "form-grid" }, h("label", { class: "wide" }, "File", file), h("label", {}, "Category", category), h("label", {}, "Title", title),
+      h("label", { class: "wide" }, "Who can see it", visibility)),
+    h("p", { class: "hint", text: "Sent as is_public. If a request leaves it out, TC makes the file public, so this console always sends it. Keep invoices, contracts and anything with customer details private. The API cannot change it later." }),
     h("div", { class: "actions" }, button));
 }
 

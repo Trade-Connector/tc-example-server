@@ -216,15 +216,29 @@ describe("TcClient", () => {
       { status: 201, body: { id: upload.attachment_id, filename: "site.png" } },
     ]);
     const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
-    const record = await tc.uploadAttachment("j1", { filename: "site.png", content_type: "image/png", category: "SITE_PHOTO", bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]) });
+    const record = await tc.uploadAttachment("j1", { filename: "site.png", content_type: "image/png", category: "SITE_PHOTO", bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]), is_public: false });
     assert.equal(record.id, upload.attachment_id);
+    // Step 1 refuses is_public (strict body), so it must not be sent there.
     assert.deepEqual(JSON.parse(calls[0]!.body!), { filename: "site.png", content_type: "image/png", category: "SITE_PHOTO", size_bytes: 4 });
     assert.equal(calls[1]!.method, "PUT");
     assert.equal(calls[1]!.url.host, "storage.example.test");
     assert.equal(calls[1]!.headers.get("content-type"), "image/png");
     assert.equal(calls[1]!.headers.get("authorization"), null, "the API key never goes to the storage URL");
     assert.equal(calls[2]!.url.pathname.endsWith(`/v1/jobs/j1/attachments/${upload.attachment_id}/complete`), true);
-    assert.deepEqual(JSON.parse(calls[2]!.body!), { filename: "site.png", content_type: "image/png", size_bytes: 4, storage_path: upload.storage_path, category: "SITE_PHOTO" });
+    assert.deepEqual(JSON.parse(calls[2]!.body!), { filename: "site.png", content_type: "image/png", size_bytes: 4, storage_path: upload.storage_path, category: "SITE_PHOTO", is_public: false });
+  });
+
+  it("sends is_public: true in step 3 when asked, and refuses an upload that does not choose", async () => {
+    const upload = { attachment_id: "11111111-2222-4333-8444-555555555555", job_id: "j1", bucket: "job-documents", storage_path: "p", upload_url: "https://storage.example.test/u", token: "t", expires_in: 7200, filename: "plan.pdf", content_type: "application/pdf", size_bytes: 4 };
+    const { calls, fetchFn } = scripted([{ status: 201, body: upload }, { status: 200, body: {} }, { status: 201, body: { id: upload.attachment_id } }]);
+    const tc = new TcClient({ baseUrl: BASE, apiKey: KEY, fetch: fetchFn });
+    await tc.uploadAttachment("j1", { filename: "plan.pdf", content_type: "application/pdf", bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]), is_public: true });
+    assert.equal(JSON.parse(calls[2]!.body!).is_public, true);
+
+    // A JavaScript caller (no type checking) that forgets the flag gets an error, not TC's public default.
+    const forgetful = { filename: "invoice.pdf", content_type: "application/pdf", bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46]) } as unknown as Parameters<TcClient["uploadAttachment"]>[1];
+    await assert.rejects(tc.uploadAttachment("j1", forgetful), TypeError);
+    assert.equal(calls.length, 3, "nothing was sent for the upload that did not choose");
   });
 
   it("works without a key for the open health route", async () => {

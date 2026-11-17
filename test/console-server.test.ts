@@ -221,6 +221,22 @@ describe("sandbox mode", () => {
     assert.equal(tcCalls.length, 0);
   });
 
+  it("uploads an attachment only with an explicit is_public, and passes it to step 3", async () => {
+    tcCalls.length = 0;
+    const file = { filename: "invoice.png", content_type: "image/png", data_base64: PNG_BASE64, category: "INVOICE" };
+    const missing = await call("POST", `/api/jobs/${JOB_ID}/attachments`, { body: file });
+    assert.equal(missing.status, 400);
+    assert.match(missing.json.error.message, /is_public/);
+    assert.equal(tcCalls.length, 0, "TC would have made the file public: nothing sent");
+
+    const ok = await call("POST", `/api/jobs/${JOB_ID}/attachments`, { body: { ...file, is_public: false } });
+    assert.equal(ok.status, 200, ok.text);
+    assert.equal(ok.json.data.is_public, false);
+    const [step1, , step3] = tcCalls;
+    assert.equal((step1!.body as Record<string, unknown>).is_public, undefined, "step 1 refuses is_public");
+    assert.equal((step3!.body as Record<string, unknown>).is_public, false);
+  });
+
   it("refuses installs (they have no sandbox)", async () => {
     tcCalls.length = 0;
     const res = await call("GET", "/api/installs");
@@ -325,8 +341,8 @@ const WRITE_ROUTES: WriteRoute[] = [
     method: "POST",
     path: `/api/jobs/${JOB_ID}/attachments`,
     target: JOB_ID,
-    body: { filename: "site.png", content_type: "image/png", data_base64: PNG_BASE64, title: "Site" },
-    changed: { filename: "site.png", content_type: "image/png", data_base64: PNG_BASE64, title: "Other" },
+    body: { filename: "site.png", content_type: "image/png", data_base64: PNG_BASE64, title: "Site", is_public: false },
+    changed: { filename: "site.png", content_type: "image/png", data_base64: PNG_BASE64, title: "Site", is_public: true },
     expected: [`POST /v1/jobs/${JOB_ID}/attachments`, "PUT storage:/upload/sign/x", `POST /v1/jobs/${JOB_ID}/attachments/${UPLOAD_ID}/complete`],
   },
   { action: "cancel_job", method: "POST", path: `/api/jobs/${JOB_ID}/cancel`, target: JOB_ID, body: { reason: "Customer moved" }, changed: { reason: "Customer stayed" }, expected: [`POST /v1/jobs/${JOB_ID}/cancel`] },
