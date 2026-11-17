@@ -8,7 +8,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
+import { CheckHistory } from "../src/check/history.ts";
 import { RetryProbe } from "../src/check/retry-probe.ts";
+import { MANUAL_ROWS, newCheckRun } from "../src/check/sandbox-check.ts";
 import type { CheckRun } from "../src/check/types.ts";
 import { loadConfig, type Config } from "../src/config.ts";
 import { clearRegisteredSecrets, registerSecret, setLogSink } from "../src/log.ts";
@@ -35,6 +37,7 @@ let store: EventStore;
 let coverage: Coverage;
 let checks: CheckManager;
 let tc: FakeTc;
+let clock: FakeClock;
 let server: Server;
 let port: number;
 let restoreSink: ReturnType<typeof setLogSink>;
@@ -64,7 +67,7 @@ before(async () => {
   store = await EventStore.open(dir);
   coverage = await Coverage.open(dir);
   store.onEvent((event) => coverage.recordEvent(event));
-  const clock = new FakeClock();
+  clock = new FakeClock();
   tc = new FakeTc({ clock });
   const probe = new RetryProbe({ now: () => clock.now() });
   tc.retryProbe = probe;
@@ -187,6 +190,37 @@ describe("console: the sandbox check", () => {
     assert.equal(current.previous.id, runId);
     assert.equal(current.previous.statuses["webhooks.manual.replay"], "pass");
     assert.equal((await call("GET", "/api/check/runs")).json.data.runs.length, 2);
+  });
+
+  it("shows a newer run from npm run check:sandbox as the latest, and ticks manual items on it", async () => {
+    await checks.settled();
+    const consoleRunId = (await call("GET", "/api/check/current")).json.data.run.id as string;
+    // npm run check:sandbox, run while npm start is up, saves its finished run into the same file.
+    const cli = newCheckRun({ source: "cli", baseUrl: FAKE_BASE, apiKey: TEST_KEY, testRetries: false, now: clock.now() + 60_000 });
+    cli.state = "finished";
+    cli.finished_at = new Date(clock.now() + 120_000).toISOString();
+    cli.start_seq = store.listEvents({ limit: 1 })[0]?.seq ?? 0;
+    await new CheckHistory(dir).save(cli);
+
+    const current = (await call("GET", "/api/check/current")).json.data;
+    assert.equal(current.run.id, cli.id, "the newest run, not the one this server ran last");
+    assert.equal(current.run.source, "cli");
+    assert.equal(current.previous.id, consoleRunId, "compared with the console's run before it");
+    const runs = (await call("GET", "/api/check/runs")).json.data.runs as Array<{ id: string }>;
+    assert.deepEqual(runs.map((r) => r.id).slice(0, 2), [cli.id, consoleRunId], "newest first, each with its own id");
+    assert.equal((await call("GET", `/api/check/runs/${cli.id}`)).json.data.run.id, cli.id, "it can be opened by its id");
+
+    // Send test event in TC: the tick goes to the newest run (the command line's), not the console's.
+    tc.queue("webhook.test", { ...tc.delivered[0]!.job, id: "00000000-0000-0000-0000-000000000000" });
+    await tc.deliverDue(store);
+    const ticked = (await call("GET", "/api/check/current")).json.data.run as CheckRun;
+    assert.equal(ticked.id, cli.id);
+    assert.equal(ticked.rows.find((r) => r.id === MANUAL_ROWS.testEvent)!.status, "pass");
+    await checks.settled();
+    const saved = JSON.parse(await readFile(path.join(dir, "sandbox-check-runs.json"), "utf8")) as { runs: CheckRun[] };
+    const status = (id: string) => saved.runs.find((r) => r.id === id)!.rows.find((r) => r.id === MANUAL_ROWS.testEvent)!.status;
+    assert.equal(status(cli.id), "pass", "saved on the command line's run");
+    assert.equal(status(consoleRunId), "needs_you", "the console's older run is left alone");
   });
 
   it("never sends a key or secret to the page", () => {

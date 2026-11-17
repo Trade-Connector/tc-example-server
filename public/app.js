@@ -5,8 +5,8 @@
 // Every piece of text from TC or from a webhook is inserted with textContent, never as HTML.
 // The pure logic lives in lib/ (tested in Node); this file is the DOM around it.
 
-import { cardOrder, createInflight, createOutcome, filterAccreditations, selectedJobTitle } from "./lib/ui-state.js";
-import { changesSince, duration, groupOpen, groupsOf, progress, statusMeta, summaryLine } from "./lib/check-view.js";
+import { cardOrder, createInflight, createOutcome, editPatch, filterAccreditations, selectedJobTitle } from "./lib/ui-state.js";
+import { changesSince, checkControlsView, duration, foldTracker, groupOpen, groupsOf, pickRun, progress, rebuildAction, statusMeta, summaryLine } from "./lib/check-view.js";
 
 // ---------------------------------------------------------------------------------------------
 // Constants (mirroring TC's rules; the server and TC enforce them, these only guide the UI)
@@ -47,7 +47,7 @@ const state = {
   lastSeq: 0,
   installs: [],
   installsCursor: null,
-  check: { run: null, report: null, previous: null, running: false, retryAvailable: false, history: [], viewingId: null, groupUi: {}, openRows: new Set(), lastPoll: 0, groupsEl: null, groupsSignature: "" },
+  check: { run: null, report: null, previous: null, running: false, retryAvailable: false, history: [], currentId: null, viewingId: null, groupUi: {}, openRows: new Set(), lastPoll: 0, groupsEl: null, groupsSignature: "" },
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -881,23 +881,11 @@ function editCard(job) {
     e.preventDefault();
     runAction(cardKey(job, "edit"), () => {
       const f = form.elements;
-      const v = (name) => (f[name] ? f[name].value.trim() : "");
-      const patch = {};
-      if (v("title") !== job.title) patch.title = v("title");
-      if (v("description") !== job.description) patch.description = v("description");
-      if (v("notes") !== (job.notes ?? "")) patch.notes = v("notes") || null;
-      const schedule = {};
-      if (v("preferred_start_date") !== (job.schedule?.preferred_start_date ?? "")) schedule.preferred_start_date = v("preferred_start_date") || null;
-      if (v("time_window") !== (job.schedule?.time_window ?? "")) schedule.time_window = v("time_window") || null;
-      if (Object.keys(schedule).length) patch.schedule = schedule;
-      const currentPrice = typeof job.price?.ex_gst_cents === "number" ? job.price.ex_gst_cents : null;
-      if (v("price_dollars")) {
-        const cents = Math.round(Number(v("price_dollars")) * 100);
-        if (!Number.isFinite(cents)) return cardNotice(job, "edit", "Edit", "The price is not a number: nothing was sent.");
-        if (cents !== currentPrice) patch.price = { ex_gst_cents: cents };
-      }
-      if (v("external_reference")) patch.external_reference = v("external_reference");
-      if (Object.keys(patch).length === 0) return cardNotice(job, "edit", "Edit", "Nothing changed, so nothing was sent. Change a field first.");
+      const values = Object.fromEntries(["title", "description", "notes", "preferred_start_date", "time_window", "price_dollars", "external_reference"]
+        .filter((name) => f[name]).map((name) => [name, f[name].value]));
+      const edit = editPatch(job, values);
+      if (edit.notice) return cardNotice(job, "edit", "Edit", edit.notice);
+      const { patch } = edit;
       return jobAction({ job, card: "edit", label: "Edit (PATCH)", method: "PATCH", path: jobPath(job), body: { patch },
         live: { action: "update_job", target: job.id, summary: `Change the LIVE job “${job.title}”: ${Object.keys(patch).join(", ")}.` } });
     });
@@ -1190,37 +1178,105 @@ function fillInstallDefaults() {
 // Sandbox check
 // ---------------------------------------------------------------------------------------------
 
-/** The run button exists only in sandbox mode: in live mode it is not on the page at all. */
+/**
+ * Tracks presses inside an element: true from a pointer or key going down in it until it comes up
+ * (anywhere). A rebuild in between would replace the element under the press and lose the click.
+ * `onRelease` runs once the click that ends the press has been delivered.
+ */
+function pressTracker(element, onRelease) {
+  let pointer = false;
+  let key = false;
+  element.addEventListener("pointerdown", () => { pointer = true; });
+  element.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") key = true; });
+  const release = (kind) => () => {
+    if (kind === "pointer" ? !pointer : !key) return;
+    if (kind === "pointer") pointer = false;
+    else key = false;
+    // After this event's click has been dispatched (it follows pointerup/keyup in the same task).
+    setTimeout(onRelease, 0);
+  };
+  for (const type of ["pointerup", "pointercancel"]) document.addEventListener(type, release("pointer"), true);
+  document.addEventListener("keyup", release("key"), true);
+  window.addEventListener("blur", () => { pointer = false; key = false; });
+  return { get pressing() { return pointer || key; } };
+}
+
+let checkControlsPress = null;
+let checkViewPress = null;
+
+function wireCheckTab() {
+  const controls = $("#check-controls");
+  const view = $("#check-view");
+  if (controls) {
+    checkControlsPress = pressTracker(controls, () => { if (controls.dataset.pending) renderCheckControls(); });
+    controls.addEventListener("focusout", () => setTimeout(() => { if (controls.dataset.pending) renderCheckControls(); }, 0));
+  }
+  if (view) checkViewPress = pressTracker(view, () => { if (view.dataset.pending) renderCheck(); });
+}
+
+/** Sets a button's disabled state, or the state it returns to if its request is running now. */
+function setDisabled(button, disabled) {
+  if (!button) return;
+  if (button.dataset.wasDisabled !== undefined) button.dataset.wasDisabled = disabled ? "1" : "";
+  else button.disabled = disabled;
+}
+
+/**
+ * The run button exists only in sandbox mode: in live mode it is not on the page at all.
+ * Rebuilt only when a run starts, finishes or appears, or the mode or the run shown changes; never
+ * while a control is being pressed or the dropdown or tick box has focus. Otherwise the labels and
+ * states are updated in place, so a click (or an open dropdown) is never lost to a re-render. A
+ * button that has focus keeps it across a rebuild.
+ */
 function renderCheckControls() {
   const controls = $("#check-controls");
   if (!controls) return;
   const c = state.check;
-  // Rebuilt only when something it shows has changed, so a click is never lost to a re-render.
-  const signature = JSON.stringify([state.env, c.running, c.retryAvailable, Boolean(c.report), c.viewingId, c.history]);
-  if (controls.dataset.signature === signature && controls.childElementCount) return;
-  controls.dataset.signature = signature;
+  const view = checkControlsView({ env: state.env, running: c.running, retryAvailable: c.retryAvailable, hasReport: Boolean(c.report),
+    viewingId: c.viewingId, currentId: c.currentId, history: c.history }, when);
+  const active = controls.contains(document.activeElement) ? document.activeElement : null;
+  const action = rebuildAction({
+    same: controls.dataset.signature === view.signature,
+    built: controls.childElementCount > 0,
+    pressing: Boolean(checkControlsPress?.pressing),
+    focused: active !== null && ["SELECT", "INPUT"].includes(active.tagName),
+  });
+  if (action !== "rebuild") {
+    controls.dataset.pending = action === "defer" ? "1" : "";
+    const run = controls.querySelector('[data-action-key="check-run"]');
+    if (run && run.textContent !== view.run.text) run.textContent = view.run.text;
+    setDisabled(run, view.run.disabled);
+    const retries = $("#check-retries", controls);
+    if (retries) retries.disabled = view.retries.disabled;
+    setDisabled(controls.querySelector('[data-action-key="check-copy"]'), view.copy.disabled);
+    const select = $("select", controls);
+    for (const option of select?.options ?? []) {
+      const label = view.options.find((o) => o.value === option.value)?.label;
+      if (label && option.textContent !== label) option.textContent = label;
+    }
+    return;
+  }
+  controls.dataset.signature = view.signature;
+  controls.dataset.pending = "";
   const items = [];
   if (state.env === "sandbox") {
     items.push(
       h("label", { class: "inline", title: c.retryAvailable ? "" : "Not available: this server cannot run the listener's retry switch." },
-        h("input", { type: "checkbox", id: "check-retries", disabled: !c.retryAvailable || c.running, checked: $("#check-retries")?.checked ?? false }),
+        h("input", { type: "checkbox", id: "check-retries", disabled: view.retries.disabled, checked: $("#check-retries")?.checked ?? false }),
         "Also test TC retries (adds about 2 min)"),
-      actionButton({ key: "check-run", text: c.running ? "Sandbox check running…" : "Run full sandbox check", class: "primary", disabled: c.running, onRun: startCheck }));
+      actionButton({ key: "check-run", text: view.run.text, class: "primary", disabled: view.run.disabled, onRun: startCheck }));
   } else {
     items.push(h("p", { class: "reason", text: "The sandbox check is not offered in live mode. Switch to Sandbox to run it. Past runs can still be viewed." }));
   }
-  items.push(actionButton({ key: "check-copy", text: "Copy report", class: "outline", disabled: !c.report, onRun: copyReport }));
-  if (c.history.length) {
-    const select = h("select", { "aria-label": "Which run to show",
-      onchange: (e) => viewRun(e.target.value || null) },
-    ...c.history.map((run, i) => h("option", {
-      value: i === 0 ? "" : run.id,
-      selected: (c.viewingId ?? "") === (i === 0 ? "" : run.id),
-      text: `${i === 0 ? "Latest" : "Earlier"}: ${when(run.started_at)} · ${run.state === "running" ? "running" : summaryLine(run.summary)}`,
-    })));
+  items.push(actionButton({ key: "check-copy", text: "Copy report", class: "outline", disabled: view.copy.disabled, onRun: copyReport }));
+  if (view.options.length) {
+    const select = h("select", { "aria-label": "Which run to show", onchange: (e) => viewRun(e.target.value) },
+      ...view.options.map((o) => h("option", { value: o.value, selected: o.selected, text: o.label })));
     items.push(h("label", { class: "inline" }, "Run", select));
   }
   controls.replaceChildren(...items);
+  const focusKey = active?.dataset?.actionKey;
+  if (focusKey) controls.querySelector(`[data-action-key="${focusKey}"]`)?.focus({ preventScroll: true });
 }
 
 async function startCheck() {
@@ -1263,7 +1319,9 @@ async function copyReport() {
   return copied;
 }
 
-async function viewRun(id) {
+async function viewRun(value) {
+  // Every option carries its run's id; the latest one means "follow the latest run".
+  const id = pickRun(value, state.check.currentId);
   state.check.viewingId = id;
   state.check.groupUi = {};
   state.check.openRows = new Set();
@@ -1295,6 +1353,7 @@ async function pollCheck(force = false) {
   c.running = current.data.running;
   c.retryAvailable = current.data.retry_available;
   if (runs.ok) c.history = runs.data.runs;
+  c.currentId = current.data.run?.id ?? null;
   if (!c.viewingId) {
     c.run = current.data.run;
     c.report = current.data.report;
@@ -1372,23 +1431,27 @@ function renderCheck() {
     h("p", { class: "hint", text: `Started ${when(run.started_at)} from the ${run.source === "cli" ? "command line" : "console"} · ${finished ? "took" : "for"} ${took} · key ${run.key_prefix ?? "-"}${run.options.test_retries ? " · with the retry test" : ""}${c.previous ? ` · ${changedCount} ${changedCount === 1 ? "row differs" : "rows differ"} from the run before (${when(c.previous.started_at)})` : ""}` }),
     timelineView(run));
   const signature = JSON.stringify([run, c.previous]);
-  const keepGroups = c.groupsEl && c.groupsSignature === signature && view.contains(c.groupsEl);
-  const groups = keepGroups ? null : groupsOf(run).map((group) => {
-    const open = groupOpen(c.groupUi, group.id, group.autoOpen);
-    const details = h("details", { class: "check-group", open });
-    details.addEventListener("toggle", () => {
-      if (details.open !== open) c.groupUi[group.id] = { ...(c.groupUi[group.id] ?? { auto: group.autoOpen }), user: details.open };
-    });
-    details.append(
-      h("summary", {}, dot(group.summary.dot, { context: group.title }), h("span", { text: group.title }), h("span", { class: "group-count", text: group.summary.count })),
-      h("div", { class: "check-rows" }, group.rows.map((row) => checkRowView(row, changes[row.id]))));
-    return details;
-  });
-  if (!keepGroups) {
-    c.groupsEl = h("div", {}, groups);
+  const shown = Boolean(c.groupsEl) && view.contains(c.groupsEl);
+  // The rows are rebuilt when the run changes (every second or so during a run), but never under
+  // a press: that waits until the press ends, so a click on a row or group is not lost.
+  const action = rebuildAction({ same: c.groupsSignature === signature, built: shown, pressing: Boolean(checkViewPress?.pressing), focused: false });
+  view.dataset.pending = action === "defer" ? "1" : "";
+  if (action === "rebuild") {
+    c.groupsEl = h("div", {}, groupsOf(run).map((group) => {
+      const open = groupOpen(c.groupUi, group.id, group.autoOpen);
+      const details = h("details", { class: "check-group", open });
+      const onToggle = foldTracker(c.groupUi, group.id, open);
+      details.addEventListener("toggle", () => onToggle(details.open));
+      details.append(
+        h("summary", {}, dot(group.summary.dot, { context: group.title }), h("span", { text: group.title }), h("span", { class: "group-count", text: group.summary.count })),
+        h("div", { class: "check-rows" }, group.rows.map((row) => checkRowView(row, changes[row.id]))));
+      return details;
+    }));
     c.groupsSignature = signature;
   }
-  view.replaceChildren(head, c.groupsEl);
+  // Only the head is swapped when the rows stay, so the node under a press is never moved.
+  if (shown && action !== "rebuild" && view.firstElementChild !== c.groupsEl) view.firstElementChild.replaceWith(head);
+  else view.replaceChildren(head, c.groupsEl);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1487,6 +1550,7 @@ function wire() {
 async function start() {
   state.token = readToken();
   wire();
+  wireCheckTab();
   renderDetail();
   if (!state.token) {
     showTokenMissing();

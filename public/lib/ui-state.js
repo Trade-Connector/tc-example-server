@@ -66,18 +66,52 @@ export function createInflight() {
 }
 
 /**
- * The cards for the selected job, in order: details, Edit, Note, Attachments, then Publish last
- * for a draft. Past DRAFT: Simulate (sandbox) and Cancel, with the Publish card kept (just before
- * them) only while it holds the result of publishing this job.
+ * The cards for the selected job, in order: details, Edit, Note, Attachments, then for a draft
+ * Publish and, after it, Cancel (TC lets you cancel a draft). Past DRAFT: Simulate (sandbox) and
+ * Cancel, with the Publish card kept (just before them) only while it holds the result of
+ * publishing this job.
  * @param {{ status: string }} job
  * @param {{ hasPublishResult?: boolean }} [options]
  * @returns {string[]}
  */
 export function cardOrder(job, { hasPublishResult = false } = {}) {
   const cards = ["details", "edit", "note", "attachments"];
-  if (job.status === "DRAFT") return [...cards, "publish"];
+  if (job.status === "DRAFT") return [...cards, "publish", "cancel"];
   if (hasPublishResult) cards.push("publish");
   return [...cards, "simulate", "cancel"];
+}
+
+/**
+ * What the Edit card sends: only the fields that changed. `values` are the form's trimmed strings.
+ * Returns { patch } to send, or { notice } to show instead (nothing is sent).
+ *
+ * The API can change a price but not remove one (price.ex_gst_cents must be above zero), so an
+ * emptied price field is refused with that reason rather than being treated as "no change".
+ * @param {{ title: string, description: string | null, notes?: string | null, schedule?: { preferred_start_date?: string | null, time_window?: string | null } | null, price?: { ex_gst_cents?: number | null } | null }} job
+ * @param {{ title?: string, description?: string, notes?: string, preferred_start_date?: string, time_window?: string, price_dollars?: string, external_reference?: string }} values
+ * @returns {{ patch: Record<string, unknown> } | { notice: string }}
+ */
+export function editPatch(job, values) {
+  const v = (name) => (typeof values[name] === "string" ? values[name].trim() : "");
+  const patch = {};
+  if (v("title") !== job.title) patch.title = v("title");
+  if (v("description") !== (job.description ?? "")) patch.description = v("description");
+  if (v("notes") !== (job.notes ?? "")) patch.notes = v("notes") || null;
+  const schedule = {};
+  if (v("preferred_start_date") !== (job.schedule?.preferred_start_date ?? "")) schedule.preferred_start_date = v("preferred_start_date") || null;
+  if (v("time_window") !== (job.schedule?.time_window ?? "")) schedule.time_window = v("time_window") || null;
+  if (Object.keys(schedule).length) patch.schedule = schedule;
+  const currentPrice = typeof job.price?.ex_gst_cents === "number" ? job.price.ex_gst_cents : null;
+  if (v("price_dollars")) {
+    const cents = Math.round(Number(v("price_dollars")) * 100);
+    if (!Number.isFinite(cents)) return { notice: "The price is not a number: nothing was sent." };
+    if (cents !== currentPrice) patch.price = { ex_gst_cents: cents };
+  } else if (currentPrice !== null) {
+    return { notice: "The API can change a price but not remove one, so nothing was sent. Put a price back (or a new one) to send your other changes." };
+  }
+  if (v("external_reference")) patch.external_reference = v("external_reference");
+  if (Object.keys(patch).length === 0) return { notice: "Nothing changed, so nothing was sent. Change a field first." };
+  return { patch };
 }
 
 /**

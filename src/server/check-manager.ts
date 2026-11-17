@@ -1,6 +1,10 @@
 // Runs the sandbox check for the console: one at a time, sandbox key only, and keeps the last
 // few runs in data/. After a run finishes it keeps watching deliveries, so a manual item (press
 // Replay in TC, Send test event, a reschedule in the TC web app) ticks when it actually happens.
+//
+// `npm run check:sandbox` saves its runs in the same file, also while npm start is running. So
+// "the latest run" is the newest one, wherever it ran: this process's run only while it is
+// running or still the newest. Manual items tick on that newest run too.
 
 import type { CheckEventSource } from "../check/event-source.ts";
 import { CheckHistory } from "../check/history.ts";
@@ -38,18 +42,23 @@ export interface CheckManagerOptions {
 export class CheckManager {
   readonly #options: CheckManagerOptions;
   readonly #history: CheckHistory;
-  /** The run in progress, or the last one this process ran (still ticking manual items). */
+  /** The run in progress, or the last one this process ran. */
   #latest: CheckRun | null = null;
   #running: Promise<CheckRun> | null = null;
-  #saving: Promise<void> = Promise.resolve();
+  /** Saves and manual ticks, one after another (each reads the file again before it writes). */
+  #queue: Promise<void> = Promise.resolve();
 
   constructor(options: CheckManagerOptions) {
     this.#options = options;
     this.#history = new CheckHistory(options.config.dataDir);
     options.store.onEvent((event) => {
-      const run = this.#latest;
-      if (!run || run.state !== "finished") return; // during a run, the run itself ticks them
-      if (applyManualEvent(run, event)) this.#save(run);
+      if (this.#running) return; // during a run, the run itself ticks them
+      this.#enqueue(async () => {
+        const run = await this.#newest();
+        if (!run || run.state !== "finished") return;
+        // The newest run is this process's own object, or a fresh copy read from the file.
+        if (applyManualEvent(run, event)) await this.#history.save(run);
+      }, "Could not tick a manual item on the sandbox check run");
     });
   }
 
@@ -104,25 +113,31 @@ export class CheckManager {
   /** Resolves when the current run (if any) has finished and been saved. For tests and shutdown. */
   async settled(): Promise<void> {
     await this.#running?.catch(() => undefined);
-    await this.#saving;
+    await this.#queue;
   }
 
-  /** The run in progress, else the newest kept run. */
+  /** The run in progress, else the newest run: kept in data/ or this process's last one. */
   async latest(): Promise<CheckRun | null> {
-    if (this.#latest) return this.#latest;
-    return (await this.#history.list())[0] ?? null;
+    await this.#queue;
+    return this.#newest();
   }
 
+  /** Every run, newest first, each with its own id. */
   async list(): Promise<CheckRunSummary[]> {
+    await this.#queue;
     const kept = await this.#history.summaries();
     const current = this.#latest;
-    if (current && !kept.some((r) => r.id === current.id)) kept.unshift(runSummary(current));
-    else if (current) kept.splice(kept.findIndex((r) => r.id === current.id), 1, runSummary(current));
-    return kept;
+    if (current) {
+      const index = kept.findIndex((r) => r.id === current.id);
+      if (index === -1) kept.push(runSummary(current));
+      else kept.splice(index, 1, runSummary(current));
+    }
+    return kept.sort(newestFirst);
   }
 
   /** One run with its report, and the statuses of the run before it (to compare). */
   async get(id: string): Promise<{ run: CheckRun; report: string; previous: PreviousRun | null } | null> {
+    await this.#queue;
     const kept = await this.#history.get(id);
     const current = this.#latest?.id === id ? this.#latest : null;
     const run = current ?? kept?.run ?? null;
@@ -132,12 +147,31 @@ export class CheckManager {
     return { run, report: formatReport(run), previous: previous ? previousRun(previous) : null };
   }
 
+  /** This process's run while it runs or while it is still the newest; otherwise the newest kept run. */
+  async #newest(): Promise<CheckRun | null> {
+    const own = this.#latest;
+    if (own && this.#running) return own;
+    const kept = (await this.#history.list())[0] ?? null;
+    if (!own) return kept;
+    if (!kept || kept.id === own.id || newestFirst(own, kept) <= 0) return own;
+    return kept;
+  }
+
   #save(run: CheckRun): void {
     if (run.state !== "finished") return;
-    this.#saving = this.#saving
-      .then(() => this.#history.save(run))
-      .catch((error: unknown) => log.error("Could not save the sandbox check run", { error: (error as Error)?.message ?? String(error) }));
+    this.#enqueue(() => this.#history.save(run), "Could not save the sandbox check run");
   }
+
+  #enqueue(work: () => Promise<void>, failure: string): void {
+    this.#queue = this.#queue
+      .then(work)
+      .catch((error: unknown) => log.error(failure, { error: (error as Error)?.message ?? String(error) }));
+  }
+}
+
+/** Sorts runs newest first (by when they started). */
+function newestFirst(a: { started_at: string }, b: { started_at: string }): number {
+  return b.started_at.localeCompare(a.started_at);
 }
 
 export interface PreviousRun {

@@ -89,6 +89,66 @@ export function toggleGroup(ui, groupId, currentlyOpen) {
   ui[groupId] = { ...previous, user: !currentlyOpen };
 }
 
+/**
+ * The handler for one rendered group's `toggle` events: records each fold or unfold as the
+ * person's choice. It ignores the event the browser fires for the state the group was drawn in,
+ * and follows the group's state itself, so folding and unfolding again before the next render
+ * is recorded as well.
+ * @returns {(nowOpen: boolean) => void}
+ */
+export function foldTracker(ui, groupId, drawnOpen) {
+  let shown = drawnOpen;
+  return (nowOpen) => {
+    if (nowOpen === shown) return;
+    toggleGroup(ui, groupId, shown);
+    shown = nowOpen;
+  };
+}
+
+/**
+ * What the check's controls show. `signature` decides when they are rebuilt: it holds only what
+ * changes the set of controls or their state (the mode, whether a run is going, which run is
+ * shown, and each run's id and state), never a running run's live summary, so the controls are
+ * not rebuilt every second during a run. The option labels (which carry the summary) are updated
+ * in place instead. Every option's value is its run's id.
+ * @param {{ env: string, running: boolean, retryAvailable: boolean, hasReport: boolean, viewingId: string | null, currentId: string | null,
+ *           history: Array<{ id: string, state: string, started_at: string, summary: any }> }} c
+ * @param {(iso: string) => string} [formatTime]
+ */
+export function checkControlsView(c, formatTime = (iso) => iso) {
+  const shownId = c.viewingId ?? c.currentId ?? c.history[0]?.id ?? null;
+  return {
+    signature: JSON.stringify([c.env, c.running, c.retryAvailable, c.hasReport, c.viewingId, c.currentId, c.history.map((run) => [run.id, run.state])]),
+    run: { text: c.running ? "Sandbox check running…" : "Run full sandbox check", disabled: c.running },
+    retries: { disabled: !c.retryAvailable || c.running },
+    copy: { disabled: !c.hasReport },
+    options: c.history.map((run, i) => ({
+      value: run.id,
+      selected: run.id === shownId,
+      label: `${i === 0 ? "Latest" : "Earlier"}: ${formatTime(run.started_at)} · ${run.state === "running" ? "running" : summaryLine(run.summary)}`,
+    })),
+  };
+}
+
+/** The run dropdown's choice: null follows the latest run (the one the server calls current). */
+export function pickRun(id, currentId) {
+  return !id || id === currentId ? null : id;
+}
+
+/**
+ * Whether to rebuild a part of the page that someone may be using:
+ * - "update": nothing it is built from changed, so only update text in place;
+ * - "defer": wait, because a press is in progress there (a pointer or key is down) or one of its
+ *   form fields has focus (an open dropdown, a tick box); rebuilding would lose the press;
+ * - "rebuild": safe to rebuild now.
+ * @param {{ same: boolean, built: boolean, pressing: boolean, focused: boolean }} input
+ */
+export function rebuildAction({ same, built, pressing, focused }) {
+  if (built && same) return "update";
+  if (built && (pressing || focused)) return "defer";
+  return "rebuild";
+}
+
 /** The groups of a run, in order, each with its rows and header. */
 export function groupsOf(run) {
   return GROUPS.map((group) => {

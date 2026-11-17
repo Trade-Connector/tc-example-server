@@ -16,7 +16,7 @@ import { Coverage } from "../src/server/coverage.ts";
 import { LiveGuard } from "../src/server/live-guard.ts";
 import { EventStore } from "../src/webhooks/store.ts";
 import * as checkView from "../public/lib/check-view.js";
-import { cardOrder, createInflight, createOutcome, filterAccreditations, selectedJobTitle } from "../public/lib/ui-state.js";
+import { cardOrder, createInflight, createOutcome, editPatch, filterAccreditations, selectedJobTitle } from "../public/lib/ui-state.js";
 import { closeServer, listenLocal, send } from "./helpers/http.ts";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,14 +98,47 @@ describe("selected job: header and card order", () => {
     assert.equal(selectedJobTitle(null), "Selected job: none");
   });
 
-  it("puts Publish last for a draft, with no Simulate or Cancel", () => {
-    assert.deepEqual(cardOrder({ status: "DRAFT" }), ["details", "edit", "note", "attachments", "publish"]);
+  it("offers Cancel for a draft too, after Publish, with no Simulate", () => {
+    assert.deepEqual(cardOrder({ status: "DRAFT" }), ["details", "edit", "note", "attachments", "publish", "cancel"]);
   });
 
   it("adds Simulate and Cancel past DRAFT, keeping Publish only while it shows its result", () => {
     assert.deepEqual(cardOrder({ status: "OPEN" }), ["details", "edit", "note", "attachments", "simulate", "cancel"]);
     assert.deepEqual(cardOrder({ status: "OPEN" }, { hasPublishResult: true }), ["details", "edit", "note", "attachments", "publish", "simulate", "cancel"]);
     assert.deepEqual(cardOrder({ status: "PAID" }), ["details", "edit", "note", "attachments", "simulate", "cancel"]);
+  });
+});
+
+describe("Edit card: what it sends", () => {
+  const job = {
+    title: "Battery install",
+    description: "Existing solar",
+    notes: null,
+    schedule: { preferred_start_date: "2026-11-24", time_window: "MORNING" },
+    price: { ex_gst_cents: 150_000 },
+  };
+  const unchanged = { title: "Battery install", description: "Existing solar", notes: "", preferred_start_date: "2026-11-24", time_window: "MORNING", price_dollars: "1500.00" };
+
+  it("sends only what changed", () => {
+    assert.deepEqual(editPatch(job, { ...unchanged, title: "Battery install (edited)" }), { patch: { title: "Battery install (edited)" } });
+    assert.deepEqual(editPatch(job, { ...unchanged, price_dollars: "1600" }), { patch: { price: { ex_gst_cents: 160_000 } } });
+  });
+
+  it("says nothing changed only when nothing did", () => {
+    assert.match((editPatch(job, unchanged) as { notice: string }).notice, /^Nothing changed, so nothing was sent/);
+  });
+
+  it("says the API cannot remove a price when the price is cleared, and sends nothing", () => {
+    for (const values of [{ ...unchanged, price_dollars: "" }, { ...unchanged, price_dollars: "  ", title: "Battery install (edited)" }]) {
+      const result = editPatch(job, values) as { notice?: string; patch?: unknown };
+      assert.equal(result.patch, undefined);
+      assert.match(result.notice!, /The API can change a price but not remove one, so nothing was sent/);
+    }
+    assert.deepEqual(editPatch({ ...job, price: { ex_gst_cents: null } }, { ...unchanged, price_dollars: "", title: "New" }), { patch: { title: "New" } }, "no price to remove");
+  });
+
+  it("refuses a price that is not a number", () => {
+    assert.match((editPatch(job, { ...unchanged, price_dollars: "abc" }) as { notice: string }).notice, /not a number/);
   });
 });
 
@@ -179,6 +212,18 @@ describe("sandbox check view", () => {
     assert.equal(checkView.groupOpen(ui, "jobs", true), true, "a row failed: opens again whatever they chose");
   });
 
+  it("records every fold and unfold through the group's toggle handler, ignoring the one for its drawn state", () => {
+    const ui: Record<string, { auto: boolean; user: boolean | null }> = {};
+    const open = checkView.groupOpen(ui, "jobs", true);
+    const onToggle = checkView.foldTracker(ui, "jobs", open);
+    onToggle(true); // the browser's toggle event for drawing it open
+    assert.equal(ui.jobs!.user, null, "drawing it is not a choice");
+    onToggle(false);
+    assert.equal(checkView.groupOpen(ui, "jobs", true), false, "folded");
+    onToggle(true); // and opened again, before any re-render
+    assert.equal(checkView.groupOpen(ui, "jobs", true), true, "opened again: the second click counts too");
+  });
+
   it("measures progress, lists groups in order, and spots rows that changed since the run before", () => {
     const run = newCheckRun({ source: "console", baseUrl: "https://tc.example.test", apiKey: null, testRetries: false });
     assert.equal(checkView.progress(run), run.rows.filter((r) => r.manual).length / run.rows.length, "manual items already have an outcome");
@@ -189,6 +234,73 @@ describe("sandbox check view", () => {
     run.state = "finished";
     assert.equal(checkView.progress(run), 1);
     assert.equal(checkView.duration(252_000), "4 min 12 s");
+  });
+});
+
+describe("sandbox check controls: the run dropdown and lost clicks", () => {
+  const summary = (passed: number) => ({ total: 50, passed, needs_you: 3, failed: 0, skipped: 0, pending: 47 - passed });
+  const base = { env: "sandbox", running: true, retryAvailable: true, hasReport: true, viewingId: null, currentId: "run-3" };
+  const history = (passed: number, state = "running") => [
+    { id: "run-3", state, started_at: "2026-11-17T03:00:00.000Z", summary: summary(passed) },
+    { id: "run-2", state: "finished", started_at: "2026-11-17T02:00:00.000Z", summary: summary(47) },
+  ];
+
+  it("gives every option its run's id, the newest first, and selects the run shown", () => {
+    const view = checkView.checkControlsView({ ...base, history: history(10) });
+    assert.deepEqual(view.options.map((o: { value: string }) => o.value), ["run-3", "run-2"], "no blank value for the latest");
+    assert.deepEqual(view.options.map((o: { selected: boolean }) => o.selected), [true, false]);
+    assert.match(view.options[0]!.label, /^Latest: .* · running$/);
+    assert.match(view.options[1]!.label, /^Earlier: .* · 47 passed/);
+    const earlier = checkView.checkControlsView({ ...base, viewingId: "run-2", history: history(10) });
+    assert.deepEqual(earlier.options.map((o: { selected: boolean }) => o.selected), [false, true]);
+  });
+
+  it("follows the latest run when its option is picked, and opens any other by id", () => {
+    assert.equal(checkView.pickRun("run-3", "run-3"), null);
+    assert.equal(checkView.pickRun("run-2", "run-3"), "run-2");
+    assert.equal(checkView.pickRun("", "run-3"), null);
+  });
+
+  it("does not rebuild the controls as a running run's summary changes, only when a run's id or state does", () => {
+    const at = (h: ReturnType<typeof history>, extra = {}) => checkView.checkControlsView({ ...base, history: h, ...extra }).signature;
+    const first = at(history(10));
+    assert.equal(at(history(11)), first, "one more row passed: the same controls");
+    const finished = history(47, "finished");
+    finished[0]!.summary = summary(47);
+    assert.notEqual(at(finished, { running: false }), first, "the run finished");
+    assert.notEqual(at([{ id: "run-4", state: "running", started_at: "2026-11-17T04:00:00.000Z", summary: summary(0) }, ...history(10)]), first, "a new run");
+    assert.notEqual(at(history(10), { viewingId: "run-2" }), first, "another run shown");
+    assert.notEqual(at(history(10), { env: "live" }), first);
+  });
+
+  it("never rebuilds under a press or a focused dropdown: it waits, and updates in place when nothing changed", () => {
+    assert.equal(checkView.rebuildAction({ same: true, built: true, pressing: true, focused: true }), "update");
+    assert.equal(checkView.rebuildAction({ same: false, built: true, pressing: true, focused: false }), "defer");
+    assert.equal(checkView.rebuildAction({ same: false, built: true, pressing: false, focused: true }), "defer");
+    assert.equal(checkView.rebuildAction({ same: false, built: true, pressing: false, focused: false }), "rebuild");
+    assert.equal(checkView.rebuildAction({ same: false, built: false, pressing: true, focused: true }), "rebuild", "nothing there yet to lose");
+  });
+
+  it("is wired into the page: the controls, the rows and the dropdown use these helpers", async () => {
+    const app = await readFile(path.join(root, "public", "app.js"), "utf8");
+    const body = (name: string) => {
+      const start = app.indexOf(`function ${name}(`);
+      assert.ok(start >= 0, name);
+      return app.slice(start, app.indexOf("\n}\n", start));
+    };
+    const controls = body("renderCheckControls");
+    assert.match(controls, /checkControlsView\(/);
+    assert.match(controls, /rebuildAction\(\{/);
+    assert.match(controls, /pressing: Boolean\(checkControlsPress\?\.pressing\)/);
+    assert.match(controls, /value: o\.value/);
+    assert.doesNotMatch(controls, /c\.history\]/, "the live history is not in the signature");
+    const view = body("renderCheck");
+    assert.match(view, /rebuildAction\(\{[^}]*pressing: Boolean\(checkViewPress\?\.pressing\)/);
+    assert.match(view, /foldTracker\(c\.groupUi, group\.id, open\)/);
+    assert.match(body("viewRun"), /pickRun\(value, state\.check\.currentId\)/);
+    assert.match(body("pollCheck"), /c\.currentId = current\.data\.run\?\.id/);
+    assert.match(body("start"), /wireCheckTab\(\)/);
+    assert.match(app, /const edit = editPatch\(job, values\)/, "the Edit card uses editPatch");
   });
 });
 
