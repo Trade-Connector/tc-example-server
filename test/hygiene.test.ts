@@ -33,4 +33,13 @@ describe("example data", () => {
       }
     }
   });
+
+  it("calls the API version v1 and nothing finer", async () => {
+    // Within v1, TC adds things without a new version number; a dotted API version would mislead.
+    const files = [...(await textFiles()), path.join(root, "CHANGELOG.md")];
+    for (const file of files) {
+      const text = await readFile(file, "utf8");
+      assert.doesNotMatch(text, /\bv1\.\d|\b1\.1\.0\b/, path.relative(root, file));
+    }
+  });
 });

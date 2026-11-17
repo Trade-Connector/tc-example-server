@@ -20,6 +20,7 @@
 //   endpoint and replay deliveries in TC if it was disabled.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { RetryProbe } from "../check/retry-probe.ts";
 import type { Config } from "../config.ts";
 import { log } from "../log.ts";
 import type { WebhookEnvelope } from "../webhooks/events.ts";
@@ -38,6 +39,11 @@ const MAX_WEBHOOK_BODY_BYTES = 1024 * 1024;
 export interface WebhookServerOptions {
   config: Pick<Config, "test" | "live">;
   store: EventStore;
+  /**
+   * The sandbox check's optional retry test (see src/check/retry-probe.ts): when armed, the next
+   * verified sandbox delivery for one job is answered 500, once, so TC retries it.
+   */
+  retryProbe?: RetryProbe;
   /** For tests: the current time in Unix seconds. */
   nowSeconds?: () => number;
 }
@@ -125,6 +131,22 @@ async function handleDelivery(
   } catch {
     sendJson(res, 400, { error: "body is not JSON" });
     await options.store.recordRejected({ environment, webhookId: result.webhookId, reason: "invalid_json", message: "Signed body is not valid JSON" });
+    return;
+  }
+
+  // The sandbox check's retry test, armed for one job it created: answer 500 once, so TC retries
+  // the same webhook-id a minute or more later. Not stored as received, so the retry is processed
+  // normally. 500, NEVER 410: 410 makes TC disable the endpoint.
+  const jobId = envelope?.data && typeof envelope.data.job === "object" ? envelope.data.job?.id : undefined;
+  if (options.retryProbe?.take(environment, jobId, result.webhookId)) {
+    sendJson(res, 500, { error: "Answered 500 on purpose for the sandbox check's retry test. Please retry." });
+    log.info("Webhook answered 500 on purpose (sandbox check retry test); TC will retry it", { environment, type: envelope?.type, webhookId: result.webhookId });
+    await options.store.recordRejected({
+      environment,
+      webhookId: result.webhookId,
+      reason: "retry_test",
+      message: "Answered 500 on purpose for the sandbox check's retry test. TC sends it again a minute or more later.",
+    });
     return;
   }
 

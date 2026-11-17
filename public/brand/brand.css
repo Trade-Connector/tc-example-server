@@ -1,0 +1,60 @@
+/* The console's brand: every colour it uses, in one place.
+ *
+ * To use your own brand, replace this file and icon.svg in public/brand/, and change the
+ * title in public/index.html. styles.css only ever refers to these variables.
+ *
+ * The Trade Connector name and logo are trademarks of Solar Cutter Solutions Pty Ltd and are not
+ * covered by the MIT licence. */
+
+:root {
+  /* Trade Connector green (the web app's --accent), and the logo's two lighter greens. */
+  --brand: #1d9d63;
+  --brand-deep: #15784c;
+  --brand-soft: #d7f0e2;
+  --brand-mid: #46c98a;
+  --brand-pale: #a7ecc9;
+  --on-brand: #ffffff;
+
+  /* Surfaces and text (from the web app's ink / paper palette). */
+  --bg: #eef2e8;
+  --card: #fbfcf8;
+  --ink: #15211b;
+  --muted: #5f6b5f;
+  --line: #d3dccb;
+  --line-strong: #b5c2ad;
+  --control-bg: #f4f7f0;
+  --row-hover: #f1f6ec;
+  --row-selected: #e3f3ea;
+  --header-bg: #15211b;
+  --on-header: #ffffff;
+  --focus: #1d9d63;
+
+  /* Status. Amber and red are the web app's --warning and --error. */
+  --ok: #15784c;
+  --ok-bg: #e3f5eb;
+  --ok-line: #a9dcbf;
+  --warn: #8a5a12;
+  --warn-strong: #c8821e;
+  --warn-bg: #fdf3e2;
+  --warn-line: #ecc98f;
+  --bad: #c0392b;
+  --bad-bg: #fdecea;
+  --bad-line: #f0b8b1;
+  --neutral-bg: #eceee9;
+  --waiting: #a3ab9f;
+
+  /* Live (production) mode: a red you cannot miss. Sandbox: the brand green. */
+  --live: #b42318;
+  --live-bg: #fde7e5;
+  --sandbox: #15784c;
+  --sandbox-bg: #dff3ea;
+
+  /* Job status badges. */
+  --status-open-bg: #e1f0fb;
+  --status-open: #0b5394;
+  --status-active-bg: #efe8fb;
+  --status-active: #5b3a9e;
+
+  --code-bg: #f1f4ed;
+  --backdrop: rgba(21, 33, 27, 0.5);
+}

@@ -18,6 +18,10 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "noEmit": true,
+    // The console's pure browser modules (public/lib/*.js) are imported by the tests: allowed,
+    // with their types read from JSDoc, but not type-checked (they are plain browser JavaScript).
+    "allowJs": true,
+    "checkJs": false,
     "skipLibCheck": true
   },
   "include": ["src/**/*.ts", "test/**/*.ts"]

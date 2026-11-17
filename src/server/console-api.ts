@@ -4,6 +4,7 @@
 // Every route returns { data, calls } on success, where `calls` lists the TC requests made
 // (operation, status, request_id), or { error, calls } on failure.
 
+import { formatReport } from "../check/report.ts";
 import type { Config } from "../config.ts";
 import { keyPrefix, log } from "../log.ts";
 import { TcClient, type ResponseInfo } from "../tc/client.ts";
@@ -22,6 +23,7 @@ import {
   type UpsertInstallRequest,
 } from "../tc/types.ts";
 import type { EventStore } from "../webhooks/store.ts";
+import { CheckRunningError, type CheckManager } from "./check-manager.ts";
 import type { Coverage } from "./coverage.ts";
 import { GuardError, type ConsoleEnvironment, type LiveAction, type LiveGuard } from "./live-guard.ts";
 import { urlHostFor } from "./http-util.ts";
@@ -32,6 +34,8 @@ export interface ConsoleContext {
   guard: LiveGuard;
   store: EventStore;
   coverage: Coverage;
+  /** Runs the one-click sandbox check. */
+  checks?: CheckManager;
   /** For tests: the fetch used to call TC. */
   fetch?: typeof fetch;
 }
@@ -388,6 +392,61 @@ route(
   async (ctx) => {
     ctx.coverage.reset();
     return ctx.coverage.report();
+  },
+  { envBound: false },
+);
+
+// ---------------------------------------------------------------------------------------------
+// The one-click sandbox check (sandbox key only; the button does not exist in live mode)
+// ---------------------------------------------------------------------------------------------
+
+function requireChecks(ctx: ConsoleContext): CheckManager {
+  if (!ctx.checks) throw new ConsoleError(503, "CHECK_UNAVAILABLE", "The sandbox check is not set up in this server.");
+  return ctx.checks;
+}
+
+route("POST", /^\/api\/check\/run$/, async (ctx, req, tc) => {
+  const call = tc();
+  if (call.environment !== "sandbox") {
+    throw new ConsoleError(403, "SANDBOX_ONLY", "The sandbox check runs only in sandbox mode, with the test key. Switch the console to Sandbox.");
+  }
+  requireKey(ctx, call);
+  const checks = requireChecks(ctx);
+  try {
+    return { run: checks.start({ testRetries: req.body.test_retries === true }) };
+  } catch (error) {
+    if (error instanceof CheckRunningError) throw new ConsoleError(409, "CHECK_RUNNING", error.message);
+    throw error;
+  }
+});
+
+route(
+  "GET",
+  /^\/api\/check\/current$/,
+  async (ctx) => {
+    const checks = requireChecks(ctx);
+    const latest = await checks.latest();
+    const found = latest ? await checks.get(latest.id) : null;
+    return {
+      run: found?.run ?? latest,
+      report: found?.report ?? (latest ? formatReport(latest) : null),
+      previous: found?.previous ?? null,
+      running: checks.running,
+      retry_available: checks.retryAvailable,
+    };
+  },
+  { envBound: false },
+);
+
+route("GET", /^\/api\/check\/runs$/, async (ctx) => ({ runs: await requireChecks(ctx).list() }), { envBound: false });
+
+route(
+  "GET",
+  /^\/api\/check\/runs\/([^/]+)$/,
+  async (ctx, req) => {
+    const found = await requireChecks(ctx).get(req.params[0]!);
+    if (!found) throw new ConsoleError(404, "NOT_FOUND", "No kept sandbox check run has that id.");
+    return found;
   },
   { envBound: false },
 );

@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -171,6 +171,98 @@ describe("npm run demo", () => {
       assert.ok(!result.stdout.includes(leaky), "a key-shaped value in any printed line is masked");
     } finally {
       sink.close();
+    }
+  });
+});
+
+describe("npm run check:sandbox", () => {
+  const LIVE_KEY = `tc_live_${"2b".repeat(24)}`;
+  const TEST_KEY = `tc_test_${"1a".repeat(24)}`;
+
+  it("refuses to run without a test key, before any call to TC", async () => {
+    const result = await run("check-sandbox.ts", dir, { TC_BASE_URL: "https://127.0.0.1:9/functions/v1/partner-api" });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /needs a tc_test_ key in TC_TEST_API_KEY/);
+    assert.doesNotMatch(result.stdout, /API health/);
+  });
+
+  it("refuses a live key in the test slot, before any call to TC", async () => {
+    const result = await run("check-sandbox.ts", dir, { TC_TEST_API_KEY: LIVE_KEY, TC_BASE_URL: "https://127.0.0.1:9/functions/v1/partner-api" });
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, /TC_TEST_API_KEY holds a tc_live_ key/);
+    assert.ok(!result.stdout.includes(LIVE_KEY));
+  });
+
+  async function unreachableTc(): Promise<{ url: string; close: () => void }> {
+    // A local port that drops every connection, so the first call fails at once, on loopback.
+    const sink = createTcpServer((socket) => socket.destroy());
+    await new Promise<void>((resolve) => sink.listen(0, "127.0.0.1", resolve));
+    return { url: `https://127.0.0.1:${(sink.address() as AddressInfo).port}/partner-api`, close: () => sink.close() };
+  }
+
+  it("runs on its own listener when npm start is not running, prints a plain report, keeps the run, exits 1 on failure", async () => {
+    const tc = await unreachableTc();
+    const cwd = path.join(dir, "check-own");
+    await mkdir(cwd, { recursive: true });
+    try {
+      const result = await run("check-sandbox.ts", cwd, { TC_TEST_API_KEY: TEST_KEY, TC_BASE_URL: tc.url, WEBHOOK_PORT: "0", DATA_DIR: path.join(cwd, "data") });
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stdout, /Listening for webhooks on 127\.0\.0\.1:[1-9]\d*/, "the port it really bound");
+      assert.match(result.stdout, /✕ API health/);
+      assert.match(result.stdout, /Result: 1 passed · 0 need you · 1 failed · \d+ skipped/);
+      assert.match(result.stdout, /tc_test_1a1a…/);
+      assert.ok(!result.stdout.includes(TEST_KEY));
+      const saved = JSON.parse(await readFile(path.join(cwd, "data", "sandbox-check-runs.json"), "utf8"));
+      assert.equal(saved.runs.length, 1);
+      assert.equal(saved.runs[0].source, "cli");
+      const port = /Listening for webhooks on 127\.0\.0\.1:(\d+)/.exec(result.stdout)![1];
+      assert.match(
+        result.stdout.trimEnd().split("\n").at(-1)!,
+        new RegExp(`^The webhook listener on port ${port} has stopped\\. Run npm start to keep receiving deliveries, or stop the tunnel`),
+        "its last line says the port has closed and what to do about the tunnel",
+      );
+    } finally {
+      tc.close();
+    }
+  });
+
+  it("masks key-shaped values in everything it prints", async () => {
+    const tc = await unreachableTc();
+    const cwd = path.join(dir, "check-mask");
+    await mkdir(cwd, { recursive: true });
+    try {
+      // The base URL carries a key-shaped string; the command prints the base URL in its banner.
+      const leaky = `tc_test_${"9f".repeat(24)}`;
+      const leakyUrl = tc.url.replace("/partner-api", `/${leaky}/partner-api`);
+      const result = await run("check-sandbox.ts", cwd, { TC_TEST_API_KEY: TEST_KEY, TC_BASE_URL: leakyUrl, WEBHOOK_PORT: "0", DATA_DIR: path.join(cwd, "data") });
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stdout, /Trade Connector sandbox check using tc_test_1a1a… at https:\/\/127\.0\.0\.1:\d+\/tc_test_9f9f…\/partner-api/, "the banner is printed, masked");
+      assert.ok(!result.stdout.includes(TEST_KEY));
+      assert.ok(!result.stdout.includes(leaky), "a key-shaped value in any printed line is masked");
+    } finally {
+      tc.close();
+    }
+  });
+
+  it("reads the server's stored deliveries instead when npm start owns the webhook port", async () => {
+    const tc = await unreachableTc();
+    const busy = createTcpServer();
+    await new Promise<void>((resolve) => busy.listen(0, "127.0.0.1", resolve));
+    const cwd = path.join(dir, "check-shared");
+    await mkdir(cwd, { recursive: true });
+    try {
+      const result = await run("check-sandbox.ts", cwd, {
+        TC_TEST_API_KEY: TEST_KEY,
+        TC_BASE_URL: tc.url,
+        WEBHOOK_PORT: String((busy.address() as AddressInfo).port),
+        DATA_DIR: path.join(cwd, "data"),
+      });
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stdout, /npm start is running, so its webhook listener receives deliveries/);
+      assert.doesNotMatch(result.stdout, /has stopped/, "npm start still owns the port, so nothing closed");
+    } finally {
+      busy.close();
+      tc.close();
     }
   });
 });

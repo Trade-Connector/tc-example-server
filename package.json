@@ -11,6 +11,7 @@
   "scripts": {
     "start": "node --disable-warning=ExperimentalWarning src/main.ts",
     "demo": "node --disable-warning=ExperimentalWarning src/demo.ts",
+    "check:sandbox": "node --disable-warning=ExperimentalWarning src/check-sandbox.ts",
     "test": "node --disable-warning=ExperimentalWarning --test \"test/**/*.test.ts\"",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
