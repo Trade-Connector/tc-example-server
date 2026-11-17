@@ -9,7 +9,16 @@ import { after, afterEach, before, describe, it } from "node:test";
 import { CheckHistory, MAX_KEPT_RUNS } from "../src/check/history.ts";
 import { formatReport, summaryLine } from "../src/check/report.ts";
 import { RetryProbe } from "../src/check/retry-probe.ts";
-import { applyManualEvent, DEFAULT_TIMINGS, EXPECTED_EVENTS, MANUAL_ROWS, newCheckRun, startSandboxCheck, type SandboxCheckDeps } from "../src/check/sandbox-check.ts";
+import {
+  applyManualEvent,
+  DEFAULT_TIMINGS,
+  EXPECTED_EVENTS,
+  MANUAL_ROWS,
+  newCheckRun,
+  startSandboxCheck,
+  webhookWaitMs,
+  type SandboxCheckDeps,
+} from "../src/check/sandbox-check.ts";
 import { tinyPng } from "../src/check/png.ts";
 import type { CheckRow, CheckRun } from "../src/check/types.ts";
 import { setLogSink } from "../src/log.ts";
@@ -18,7 +27,7 @@ import { flushJsonWrites } from "../src/store/json-file.ts";
 import { EventStore, type StoredEvent } from "../src/webhooks/store.ts";
 import { FAKE_BASE, FakeClock, FakeTc, refusingListener, type FakeTcOptions } from "./helpers/fake-tc.ts";
 import { closeServer, listenLocal } from "./helpers/http.ts";
-import { makeSecret } from "./helpers/tc-signer.ts";
+import { makeSecret, sampleJob } from "./helpers/tc-signer.ts";
 
 const KEY = `tc_test_${"3c".repeat(24)}`;
 let restoreSink: ReturnType<typeof setLogSink>;
@@ -45,7 +54,14 @@ interface Harness {
 }
 
 async function runCheck(
-  options: { fake?: Omit<FakeTcOptions, "clock">; deps?: Partial<SandboxCheckDeps>; retries?: boolean; probe?: "real" | "none" } = {},
+  options: {
+    fake?: Omit<FakeTcOptions, "clock">;
+    deps?: Partial<SandboxCheckDeps>;
+    retries?: boolean;
+    probe?: "real" | "none";
+    /** Runs just before the check starts (e.g. to leave state from an earlier run). */
+    beforeStart?: (setup: { tc: FakeTc; probe: RetryProbe | null }) => void;
+  } = {},
 ): Promise<Harness> {
   const dir = await mkdtemp(path.join(tmpdir(), "tc-check-"));
   dirs.push(dir);
@@ -55,6 +71,7 @@ async function runCheck(
   tc.seedOwnersJob();
   const probe = options.probe === "none" ? null : new RetryProbe({ now: () => clock.now() });
   tc.retryProbe = probe;
+  options.beforeStart?.({ tc, probe });
   let updates = 0;
   const startedAt = clock.now();
   const { run, finished } = startSandboxCheck({
@@ -230,11 +247,32 @@ describe("sandbox check: webhooks that do not come", () => {
     const h = await runCheck({ fake: { drop: (type) => type === "job.evidence_ready" } });
     const row = h.row("webhooks.a.evidence_ready");
     assert.equal(row.status, "fail");
-    assert.match(row.reason!, /No job\.evidence_ready arrived within 120 s of the step, although other events for job A did/);
+    assert.match(row.reason!, /No job\.evidence_ready arrived within 4 minutes of the last step, although other events for job A did/);
     assert.match(row.reason!, /TC sends only the event types your endpoint subscribes to: check that job\.evidence_ready is ticked for your sandbox endpoint/);
     assert.deepEqual(statuses(h.run, "fail"), ["webhooks.a.evidence_ready"]);
     const waited = h.clock.now() - h.startedAt;
-    assert.ok(waited >= DEFAULT_TIMINGS.batchMs && waited < DEFAULT_TIMINGS.batchMs + 30_000, `waited ${waited} ms`);
+    assert.ok(waited >= 4 * 60_000 && waited < 4 * 60_000 + 5_000, `waited ${waited} ms`);
+  });
+
+  it("waits one minute per 8 expected deliveries, plus one, after the last step, and never past the bound", () => {
+    assert.equal(webhookWaitMs(8, false), 2 * 60_000);
+    assert.equal(webhookWaitMs(9, false), 3 * 60_000);
+    assert.equal(webhookWaitMs(18, false), 4 * 60_000, "the 17 expected events and job B's price change at create");
+    assert.equal(webhookWaitMs(19, true), 6 * 60_000, "plus the refused delivery and the retry allowance");
+    assert.equal(webhookWaitMs(500, true), DEFAULT_TIMINGS.overallMs);
+    assert.ok(webhookWaitMs(EXPECTED_EVENTS.length + 2, true) < DEFAULT_TIMINGS.overallMs, "the check's own wait fits inside the bound");
+  });
+
+  it("times an early step's missing webhook from the last step, not from its own step", async () => {
+    // The steps take about 16 s here; job A's job.created belongs to the first of them.
+    const h = await runCheck({ fake: { requestMs: 600, drop: (type, job) => type === "job.created" && job.status === "DRAFT" } });
+    const row = h.row("webhooks.a.created");
+    assert.equal(row.status, "fail");
+    const lastStep = Date.parse(h.row("lifecycle.cancel").finished_at!);
+    const ownStep = Date.parse(h.row("jobs.create_draft").finished_at!);
+    assert.ok(lastStep - ownStep > 10_000, "the last step is well after job A's create");
+    const failedAt = Date.parse(row.finished_at!);
+    assert.ok(failedAt - lastStep >= 4 * 60_000 && failedAt - lastStep < 4 * 60_000 + 5_000, `failed ${failedAt - lastStep} ms after the last step`);
   });
 
   it("says to check the tunnel when nothing arrives at all, and stays bounded", async () => {
@@ -285,7 +323,7 @@ describe("sandbox check: webhooks that do not come", () => {
       if (h.row(spec.rowId).status === "pass") continue; // arrived before the wait (the fake delivers anyway)
       assert.match(h.row(spec.rowId).reason!, /TC_TEST_WEBHOOK_SECRET is not set/);
     }
-    assert.ok(h.clock.now() - h.startedAt < DEFAULT_TIMINGS.batchMs, "no 2-minute wait");
+    assert.ok(h.clock.now() - h.startedAt < 60_000, "no webhook wait");
   });
 });
 
@@ -335,6 +373,14 @@ describe("sandbox check: TC errors", () => {
     assert.equal(row.status, "fail");
     assert.match(row.reason!, /TC applied a cancellation fee to a sandbox job cancelled from ASSIGNED/);
   });
+
+  it("fails the cancel row when TC's answer says the job was not ASSIGNED before the cancel", async () => {
+    const h = await runCheck({ fake: { cancelPreviousStatus: "OPEN" } });
+    assert.equal(h.row("lifecycle.b_assigned").status, "pass", "the job really was ASSIGNED");
+    const row = h.row("lifecycle.cancel");
+    assert.equal(row.status, "fail");
+    assert.match(row.reason!, /previous_status is "OPEN", expected ASSIGNED\./);
+  });
 });
 
 describe("sandbox check: the retry test", () => {
@@ -367,8 +413,40 @@ describe("sandbox check: the retry test", () => {
     const h = await runCheck({ retries: true, fake: { neverRetry: true } });
     const row = h.row("webhooks.retry");
     assert.equal(row.status, "fail");
-    assert.match(row.reason!, /did not deliver it again within 180 s/);
+    // The retry waits as long as the other webhooks (6 minutes after the last step with the retry
+    // test on), since the retried delivery queues behind them.
+    assert.match(row.reason!, /did not deliver it again within 5 min 5\d s\./);
     assert.ok(h.clock.now() - h.startedAt <= DEFAULT_TIMINGS.overallMs + 5_000);
+  });
+
+  it("ignores TC's retry of a delivery an earlier run refused: only this run's own retry counts", async () => {
+    const earlierJob = "0e0e0e0e-1111-4222-8333-444444444444";
+    const h = await runCheck({
+      retries: true,
+      // This run's own refused delivery is never sent again, so its retry row must fail.
+      fake: { neverRetry: true },
+      beforeStart: ({ tc, probe }) => {
+        // An earlier run's probe refused a delivery for that run's job A...
+        probe!.arm(earlierJob);
+        assert.equal(probe!.take("sandbox", earlierJob, "evt-earlier-run"), true);
+        // ...and TC's retry of it lands as this run starts, before this run arms the probe.
+        tc.pending.push({
+          webhookId: "evt-earlier-run",
+          type: "job.created",
+          job: sampleJob({ id: earlierJob, external_reference: "CHECK-2026-11-16-e4r1-A", is_sandbox: true }),
+          changes: {},
+          deliverAt: tc.clock.now(),
+        });
+      },
+    });
+    const earlier = h.store.listEvents().find((e) => e.webhook_id === "evt-earlier-run" && e.verified);
+    assert.ok(earlier, "the earlier run's retry arrived during this run");
+    assert.ok(earlier.seq > h.run.start_seq, "after this run started");
+    const row = h.row("webhooks.retry");
+    assert.equal(row.status, "fail", row.reason ?? "");
+    assert.doesNotMatch(row.reason!, /evt-earlier-run/);
+    assert.match(row.reason!, /did not deliver it again/);
+    assert.equal(h.tc.refused.length, 1, "this run refused one delivery of its own");
   });
 
   it("is amber with the reason when this process does not own the listener", async () => {
@@ -382,6 +460,60 @@ describe("sandbox check: the retry test", () => {
   it("has no retry row unless asked", async () => {
     const run = newCheckRun({ source: "console", baseUrl: FAKE_BASE, apiKey: KEY, testRetries: false });
     assert.ok(!run.rows.some((r) => r.id === "webhooks.retry"));
+  });
+});
+
+describe("sandbox check: TC's batched delivery (8 a minute per endpoint, oldest first)", () => {
+  // When TC's first dispatcher run lands, in seconds after the check starts. Each API call takes
+  // 0.6 s here, so the steps take about 16 s and make 18 deliveries (17 expected, plus job B's
+  // price change at create): some runs land during the steps, some after.
+  const OFFSETS_S = [2, 8, 20, 40, 59];
+  const batched = (firstRunS: number): Omit<FakeTcOptions, "clock"> => ({ dispatcher: { firstRunMs: firstRunS * 1000 }, requestMs: 600 });
+
+  for (const offset of OFFSETS_S) {
+    it(`passes every webhook row when TC's first run is ${offset} s in`, async () => {
+      const h = await runCheck({ fake: batched(offset) });
+      for (const spec of EXPECTED_EVENTS) {
+        const row = h.row(spec.rowId);
+        assert.equal(row.status, "pass", `${spec.rowId}: ${row.reason}`);
+        assert.doesNotMatch(row.reason!, /late/, `${spec.rowId} was given up on, then arrived`);
+      }
+      assert.deepEqual(statuses(h.run, "fail"), []);
+      assert.equal(h.row("webhooks.b.matches_get").status, "pass", h.row("webhooks.b.matches_get").reason ?? "");
+      // The fake really batched: 18 deliveries need three runs, so they spread over at least a minute.
+      assert.equal(h.tc.delivered.length, 18);
+      const received = h.store.listEvents().filter((e) => e.verified).map((e) => Date.parse(e.received_at));
+      assert.ok(Math.max(...received) - Math.min(...received) >= 60_000, "spread over more than one run");
+    });
+
+    it(`passes the retry test too when TC's first run is ${offset} s in`, async () => {
+      const h = await runCheck({ fake: batched(offset), retries: true });
+      assert.equal(h.row("webhooks.retry").status, "pass", h.row("webhooks.retry").reason ?? "");
+      assert.deepEqual(statuses(h.run, "fail"), []);
+      // Not given up on and then let off: a row failed at its deadline turns "Arrived late" if
+      // the run is still waiting for something else when it comes.
+      for (const spec of EXPECTED_EVENTS) assert.doesNotMatch(h.row(spec.rowId).reason!, /late/, spec.rowId);
+      assert.equal(h.tc.refused.length, 1);
+    });
+  }
+
+  it("says honestly what it is waiting for while TC's batches come in", async () => {
+    const notes: string[] = [];
+    await runCheck({
+      fake: batched(40),
+      deps: {
+        onUpdate: (_run, row) => {
+          if (row?.group === "webhooks" && row.status === "running" && row.reason && notes.at(-1) !== row.reason) notes.push(row.reason);
+        },
+      },
+    });
+    assert.ok(notes.length >= 2, notes.join("\n"));
+    const counts = notes.map((note) => {
+      const match = /^Waiting for TC's webhooks: (\d+) of 17 so far\. TC sends up to 8 a minute, so this can take about 3 minutes; the check waits up to 4 minutes after the last step\.$/.exec(note);
+      assert.ok(match, note);
+      return Number(match[1]);
+    });
+    assert.ok(counts.every((n, i) => i === 0 || n > counts[i - 1]!), `counts only go up: ${counts.join(", ")}`);
   });
 });
 

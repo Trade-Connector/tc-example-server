@@ -3,7 +3,8 @@
 //
 // It walks the whole Partner API against the SANDBOX with a tc_test_ key, using two jobs it
 // creates itself (uniquely referenced CHECK-<date>-<tag>-A and -B). It never changes any other
-// job. Then it waits for the webhooks those steps should send, and checks each one.
+// job. Then it waits for the webhooks those steps should send, and checks each one. TC sends them
+// in batches (see TC_DELIVERIES_PER_RUN), so the wait takes a few minutes.
 //
 // Every step is a row (see types.ts). A row records the requests it made and the answers it got,
 // without the API key. Steps that depend on an earlier one are skipped, with the reason, when that
@@ -36,7 +37,7 @@ import type { AttachmentUpload, CreateJobRequest, Job, SimulateTarget, TradeType
 import { preciseInstant, type StoredEvent } from "../webhooks/store.ts";
 import type { CheckEventSource } from "./event-source.ts";
 import { tinyPng } from "./png.ts";
-import type { RetryProbe } from "./retry-probe.ts";
+import type { RefusedDelivery, RetryProbe } from "./retry-probe.ts";
 import {
   CHECK_GROUPS,
   summarize,
@@ -59,26 +60,48 @@ const realClock: CheckClock = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
+// How TC delivers webhooks: a dispatcher runs once a minute and sends at most this many deliveries
+// per endpoint per run, oldest first. The rest wait for the next run, so the check's burst of
+// events takes a few minutes to arrive, and an early step's webhooks can queue behind later ones.
+export const TC_DELIVERIES_PER_RUN = 8;
+
+/** How a webhook row's note starts while the check waits (the CLI prints it). */
+export const WAITING_NOTE_PREFIX = "Waiting for TC's webhooks:";
+
 export interface CheckTimings {
-  /** How long to wait for a step's webhooks. TC sends within about a minute. */
-  batchMs: number;
-  /** Added to job A's waits when the retry test is on (one of its deliveries is retried a minute later). */
+  /** How often TC's dispatcher runs. */
+  dispatchMs: number;
+  /** Added to every webhook wait, after one dispatcher run per 8 expected deliveries. */
+  marginMs: number;
+  /** Added to the wait when the retry test is on: the refused delivery is due again a minute after the 500, behind older ones. */
   retryExtraMs: number;
-  /** After the deliberate 500: TC retries after a minute, on its next dispatch run. */
+  /** After the deliberate 500, the retry row waits at least this long for TC to send it again. */
   retryMs: number;
   /** How often to look for new deliveries. */
   pollMs: number;
-  /** A hard bound on the whole webhook wait. */
+  /** A hard bound on the whole webhook wait. 10 minutes covers up to 56 deliveries with the retry test on. */
   overallMs: number;
 }
 
 export const DEFAULT_TIMINGS: CheckTimings = {
-  batchMs: 120_000,
+  dispatchMs: 60_000,
+  marginMs: 60_000,
   retryExtraMs: 120_000,
   retryMs: 180_000,
   pollMs: 1_000,
   overallMs: 10 * 60_000,
 };
+
+/**
+ * How long to wait after the last step for `deliveries` webhooks: one dispatcher run per 8
+ * (rounded up), one more as a margin, and the retry allowance when the retry test is on. Never
+ * more than overallMs.
+ */
+export function webhookWaitMs(deliveries: number, retryTest: boolean, timings: CheckTimings = DEFAULT_TIMINGS): number {
+  const runs = Math.ceil(Math.max(deliveries, 1) / TC_DELIVERIES_PER_RUN);
+  const wait = runs * timings.dispatchMs + timings.marginMs + (retryTest ? timings.retryExtraMs : 0);
+  return Math.min(wait, timings.overallMs);
+}
 
 export interface SandboxCheckDeps {
   source: CheckRun["source"];
@@ -461,6 +484,16 @@ function seconds(ms: number): string {
   return `${Math.max(0, Math.round(ms / 1000))} s`;
 }
 
+/** "4 minutes", "1 min 30 s" or "45 s". */
+function duration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const rest = total % 60;
+  if (!minutes) return `${rest} s`;
+  if (!rest) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  return `${minutes} min ${rest} s`;
+}
+
 /** Statuses the timeline treats as finished. */
 const FINAL: ReadonlySet<RowStatus> = new Set(["pass", "fail", "skipped", "needs_you"]);
 
@@ -495,6 +528,8 @@ class SandboxCheck {
   readonly #extras: StoredEvent[] = [];
   readonly #matched = new Map<string, StoredEvent>();
   #retryArmedAt: number | null = null;
+  /** How long the webhook wait allows after the last step (set when the wait starts). */
+  #waitMs = 0;
 
   constructor(run: CheckRun, deps: SandboxCheckDeps) {
     this.run = run;
@@ -1147,7 +1182,7 @@ class SandboxCheck {
     if (applyManualEvent(this.run, event)) this.#emit(null);
 
     const retryRow = this.#rows.get("webhooks.retry");
-    const refused = this.#deps.retryProbe?.refused;
+    const refused = this.#ownRefusal();
     if (retryRow && refused && event.webhook_id === refused.webhookId && !FINAL.has(retryRow.status)) {
       this.#finish(
         retryRow,
@@ -1186,24 +1221,40 @@ class SandboxCheck {
 
   #missingReason(spec: ExpectedEvent): string {
     const forJob = this.#received.filter((e) => this.#jobOf(e) === spec.job);
-    const wait = seconds(this.#timings.batchMs + (this.#retryOn() && spec.job === "A" ? this.#timings.retryExtraMs : 0));
+    const wait = duration(this.#waitMs);
     if (this.#received.length === 0) {
-      return `Nothing arrived for the check's jobs within ${wait}. Is the tunnel running, and does your TC sandbox endpoint point at it (Settings → API & Webhooks → Webhooks)? Check its Deliveries tab for errors.`;
+      return `Nothing arrived for the check's jobs within ${wait} of the last step. Is the tunnel running, and does your TC sandbox endpoint point at it (Settings → API & Webhooks → Webhooks)? Check its Deliveries tab for errors.`;
     }
     const nearMiss = forJob.find((e) => e.event_type === spec.type && !e.flags.duplicate && !SandboxCheck.#matches(spec, e));
     if (nearMiss) {
       return `A ${spec.type} arrived, but the job inside it was ${nearMiss.job_status}${spec.to ? ` (changes.job_status.to ${JSON.stringify((nearMiss.changes as { job_status?: { to?: unknown } } | null)?.job_status?.to)})` : ""}, expected ${spec.to ?? spec.jobStatus}.`;
     }
-    return `No ${spec.type}${spec.to ? ` → ${spec.to}` : ""} arrived within ${wait} of the step, although other events for job ${spec.job} did. TC sends only the event types your endpoint subscribes to: check that ${spec.type} is ticked for your sandbox endpoint (Settings → API & Webhooks → Webhooks).`;
+    return `No ${spec.type}${spec.to ? ` → ${spec.to}` : ""} arrived within ${wait} of the last step, although other events for job ${spec.job} did. TC sends only the event types your endpoint subscribes to: check that ${spec.type} is ticked for your sandbox endpoint (Settings → API & Webhooks → Webhooks).`;
   }
 
-  #retryOn(): boolean {
-    return this.#deps.options.testRetries && this.#deps.retryProbe !== null;
+  /**
+   * The delivery the probe refused, only when this run armed it. A refusal from an earlier run
+   * (its record stays until the probe is armed again) never counts for this run's retry row.
+   */
+  #ownRefusal(): RefusedDelivery | null {
+    const refused = this.#deps.retryProbe?.refused ?? null;
+    if (!refused || this.#retryArmedAt === null || refused.at < this.#retryArmedAt) return null;
+    return refused;
+  }
+
+  /** What a webhook row says while the check waits. */
+  #waitingNote(arrived: number, expected: number, deliveries: number): string {
+    const runs = Math.ceil(deliveries / TC_DELIVERIES_PER_RUN);
+    return `${WAITING_NOTE_PREFIX} ${arrived} of ${expected} so far. TC sends up to ${TC_DELIVERIES_PER_RUN} a minute, so this can take about ${duration(runs * this.#timings.dispatchMs)}; the check waits up to ${duration(this.#waitMs)} after the last step.`;
   }
 
   async #waitForWebhooks(): Promise<void> {
     const t = this.#timings;
+    // Every wait runs from here, the end of the last step, not from each event's own step: TC
+    // sends in batches, oldest first, so an early step's webhooks can queue behind later ones.
+    const lastStepAt = this.#clock.now();
     const retryRow = this.#rows.get("webhooks.retry");
+    const expected = EXPECTED_EVENTS.filter((spec) => this.#triggerAt.has(spec.trigger));
     const active: ExpectedEvent[] = [];
     for (const spec of EXPECTED_EVENTS) {
       const row = this.#row(spec.rowId);
@@ -1230,38 +1281,55 @@ class SandboxCheck {
       return;
     }
 
+    // What TC sends for the check's jobs: the expected events, job B's possible price change at
+    // create (it is created with a price), and the refused delivery once more.
+    const retrying = retryRow !== undefined && !FINAL.has(retryRow.status);
+    const deliveries = expected.length + (this.#triggerAt.has("jobs.create_second") ? 1 : 0) + (retrying ? 1 : 0);
+    this.#waitMs = webhookWaitMs(deliveries, retrying, t);
+    const until = lastStepAt + this.#waitMs;
+    const hardStop = lastStepAt + t.overallMs;
+    const arrivedCount = () => expected.filter((spec) => this.#matched.has(spec.rowId)).length;
+    let shown = arrivedCount();
+    const note = () => this.#waitingNote(shown, expected.length, deliveries);
+
     for (const spec of active) {
       const row = this.#row(spec.rowId);
-      if (!FINAL.has(row.status)) this.#begin(row, "Waiting for TC to deliver it (TC sends within about a minute)…");
+      if (!FINAL.has(row.status)) this.#begin(row, note());
     }
     if (retryRow && !FINAL.has(retryRow.status)) {
-      this.#begin(retryRow, "The listener answers 500 once to the next delivery for job A, then waits for TC to send it again (about a minute later).");
+      this.#begin(
+        retryRow,
+        "The listener answers 500 once to the next delivery for job A, then waits for TC to send it again. TC tries again a minute after the 500 at the earliest, behind any deliveries still queued, so this can take a few minutes.",
+      );
     }
-
-    const deadline = (spec: ExpectedEvent) =>
-      this.#triggerAt.get(spec.trigger)! + t.batchMs + (this.#retryOn() && spec.job === "A" ? t.retryExtraMs : 0);
-    const hardStop = this.#clock.now() + t.overallMs;
 
     for (;;) {
       await this.#pollEvents();
       const now = this.#clock.now();
       const stop = now >= hardStop;
-      let pending = false;
+      const waiting: CheckRow[] = [];
       for (const spec of active) {
         const row = this.#row(spec.rowId);
         if (FINAL.has(row.status)) continue;
-        if (stop || now >= deadline(spec)) this.#finish(row, "fail", this.#missingReason(spec));
-        else pending = true;
+        if (stop || now >= until) this.#finish(row, "fail", this.#missingReason(spec));
+        else waiting.push(row);
+      }
+      let pending = waiting.length > 0;
+      if (pending && arrivedCount() !== shown) {
+        shown = arrivedCount();
+        for (const row of waiting) row.reason = note();
+        this.#emit(waiting[0]!);
       }
       if (retryRow && !FINAL.has(retryRow.status)) {
-        const refused = this.#deps.retryProbe?.refused;
+        const refused = this.#ownRefusal();
         if (refused) {
-          if (stop || now >= refused.at + t.retryMs) {
-            this.#finish(retryRow, "fail", `The listener answered 500 to webhook-id ${refused.webhookId}, but TC did not deliver it again within ${seconds(t.retryMs)}.`);
+          const retryUntil = Math.min(hardStop, Math.max(until, refused.at + t.retryMs));
+          if (stop || now >= retryUntil) {
+            this.#finish(retryRow, "fail", `The listener answered 500 to webhook-id ${refused.webhookId}, but TC did not deliver it again within ${duration(now - refused.at)}.`);
           } else {
             pending = true;
           }
-        } else if (stop || now >= this.#retryArmedAt! + t.batchMs + t.retryExtraMs) {
+        } else if (stop || now >= until) {
           this.#finish(retryRow, "fail", "No delivery for job A arrived, so the listener had nothing to answer 500 to.");
         } else {
           pending = true;

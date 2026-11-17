@@ -2,7 +2,7 @@
 //
 // When armed for one job, the webhook listener answers 500 to the NEXT verified delivery for that
 // job on the SANDBOX path, once, and records it as refused (not as received). TC then retries the
-// same webhook-id about a minute later, and the check expects to see it arrive.
+// same webhook-id a minute or more later (in a later batch), and the check expects to see it arrive.
 //
 // It is narrow on purpose, so real deliveries are never affected:
 // - sandbox path only (there is no way to arm it for live);

@@ -6,7 +6,7 @@ import type { Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { RetryProbe } from "../src/check/retry-probe.ts";
+import { RETRY_PROBE_TTL_MS, RetryProbe } from "../src/check/retry-probe.ts";
 import { setLogSink } from "../src/log.ts";
 import { createWebhookServer } from "../src/server/webhook-listener.ts";
 import { flushJsonWrites } from "../src/store/json-file.ts";
@@ -101,6 +101,19 @@ describe("retry probe in the webhook listener", () => {
     const stored = store.listEvents().find((e) => e.webhook_id === "evt-late")!;
     assert.equal(stored.verified, true, "processed as a normal delivery");
     assert.equal(probe.armed, false);
+  });
+
+  it("never stays armed longer than 10 minutes, whatever the caller asks for", () => {
+    let t = 5_000_000;
+    const capped = new RetryProbe({ now: () => t });
+    assert.equal(RETRY_PROBE_TTL_MS, 10 * 60_000);
+    capped.arm(CHECK_JOB, 60 * 60_000);
+    t += RETRY_PROBE_TTL_MS;
+    assert.equal(capped.armed, true, "still armed at exactly 10 minutes");
+    t += 1;
+    assert.equal(capped.take("sandbox", CHECK_JOB, "evt-capped"), false, "expired at 10 minutes, not at the hour asked for");
+    assert.equal(capped.refused, null);
+    assert.equal(capped.armed, false);
   });
 
   it("only arms for a job UUID", () => {

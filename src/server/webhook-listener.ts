@@ -135,7 +135,7 @@ async function handleDelivery(
   }
 
   // The sandbox check's retry test, armed for one job it created: answer 500 once, so TC retries
-  // the same webhook-id about a minute later. Not stored as received, so the retry is processed
+  // the same webhook-id a minute or more later. Not stored as received, so the retry is processed
   // normally. 500, NEVER 410: 410 makes TC disable the endpoint.
   const jobId = envelope?.data && typeof envelope.data.job === "object" ? envelope.data.job?.id : undefined;
   if (options.retryProbe?.take(environment, jobId, result.webhookId)) {
@@ -145,7 +145,7 @@ async function handleDelivery(
       environment,
       webhookId: result.webhookId,
       reason: "retry_test",
-      message: "Answered 500 on purpose for the sandbox check's retry test. TC sends it again about a minute later.",
+      message: "Answered 500 on purpose for the sandbox check's retry test. TC sends it again a minute or more later.",
     });
     return;
   }

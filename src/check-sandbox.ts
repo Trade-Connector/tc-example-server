@@ -1,8 +1,9 @@
 // npm run check:sandbox: the same one-click sandbox check as the console's "Run full sandbox
 // check" button, from the command line.
 //
-//   npm run check:sandbox                 the full check (takes a few minutes: it waits for webhooks)
-//   npm run check:sandbox -- --retries    also test TC's retries (adds about 2 minutes)
+//   npm run check:sandbox                 the full check (takes a few minutes: it waits for webhooks,
+//                                         which TC sends in batches of up to 8 a minute)
+//   npm run check:sandbox -- --retries    also test TC's retries (can add up to 2 minutes)
 //
 // Sandbox only: it refuses to run without a tc_test_ key, and never uses a live key. It creates
 // its own two jobs (CHECK-<date>-<tag>-A and -B) and changes no other job.
@@ -20,7 +21,7 @@ import { fileEventSource, storeEventSource, type CheckEventSource } from "./chec
 import { CheckHistory } from "./check/history.ts";
 import { formatReport } from "./check/report.ts";
 import { RetryProbe } from "./check/retry-probe.ts";
-import { startSandboxCheck } from "./check/sandbox-check.ts";
+import { startSandboxCheck, WAITING_NOTE_PREFIX } from "./check/sandbox-check.ts";
 import type { CheckRow } from "./check/types.ts";
 import { ConfigError, loadConfig, loadDotEnv } from "./config.ts";
 import { keyPrefix, redact, registerSecret, setLogLevel } from "./log.ts";
@@ -98,10 +99,13 @@ async function main(): Promise<void> {
       ? `Listening for webhooks on ${urlHostFor(config.webhookHost)}:${listenerPort} (npm start is not running). Your tunnel must point here.`
       : `npm start is running, so its webhook listener receives deliveries; this reads them from ${config.dataDir}/.`,
   );
-  out("It takes a few minutes: TC sends each webhook within about a minute, and the check waits for every one.");
+  out("It takes a few minutes: TC sends webhooks in batches, up to 8 a minute, and the check waits for every one.");
   out();
 
   const printed = new Set<string>();
+  // The webhook rows share one "Waiting for TC's webhooks" note: print it when it changes, at most
+  // once a minute (TC sends a batch a minute).
+  let lastNote = { text: "", at: 0 };
   const { run, finished } = startSandboxCheck({
     source: "cli",
     baseUrl: config.baseUrl,
@@ -115,7 +119,15 @@ async function main(): Promise<void> {
     coverage,
     options: { testRetries },
     onUpdate: (_run, row) => {
-      if (!row || printed.has(`${row.id}:${row.status}`)) return;
+      if (!row) return;
+      if (row.status === "running" && row.reason?.startsWith(WAITING_NOTE_PREFIX)) {
+        if (row.reason !== lastNote.text && Date.now() - lastNote.at >= 60_000) {
+          lastNote = { text: row.reason, at: Date.now() };
+          out(`… ${row.reason}`);
+        }
+        return;
+      }
+      if (printed.has(`${row.id}:${row.status}`)) return;
       if (row.status === "waiting" || row.status === "running") return;
       printed.add(`${row.id}:${row.status}`);
       const time = row.duration_ms !== null && row.status !== "needs_you" ? ` (${row.duration_ms} ms)` : "";
@@ -134,6 +146,8 @@ async function main(): Promise<void> {
     void flushJsonWrites().finally(() => process.exit(130));
   });
 
+  // `finished` settles only once every webhook wait (the retry row's too) is over, so the listener
+  // stays open for TC's last batches. Close it only after that.
   const done = await finished;
   await new CheckHistory(config.dataDir).save(done);
   if (ownListener) {

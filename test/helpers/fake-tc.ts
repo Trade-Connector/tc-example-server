@@ -2,6 +2,12 @@
 // TC's sandbox rules (statuses, JOB_LOCKED, idempotency, scopes, simulate) and emits the webhooks
 // TC's triggers would, then "delivers" them into a real EventStore when the virtual clock says
 // they are due. No network, no real waiting.
+//
+// Two delivery shapes:
+// - the default: every event arrives a fixed delay after its change (quick tests);
+// - `dispatcher`: TC's real shape. A dispatcher run once a minute claims at most 8 due deliveries
+//   per endpoint, oldest first, and sends them; the rest wait for the next run. A failed delivery
+//   is due again a minute after the attempt, and queues behind older ones.
 
 import { randomUUID } from "node:crypto";
 import type { CheckEventSource } from "../../src/check/event-source.ts";
@@ -38,16 +44,33 @@ interface Pending {
   type: string;
   job: Job;
   changes: Record<string, unknown>;
+  /** When it is due: delivered then (default shape), or claimable by a dispatcher run from then. */
   deliverAt: number;
   duplicate?: boolean;
+}
+
+/** TC's batched delivery: see the top of this file. */
+export interface FakeDispatcher {
+  /** When the first dispatcher run happens, after the fake TC is made (so the check starts). */
+  firstRunMs: number;
+  /** Time between runs. Default 60 s (TC's cron runs every minute). */
+  everyMs?: number;
+  /** Deliveries claimed per endpoint per run. Default 8. */
+  perRun?: number;
+  /** Time to send one delivery; a run sends its batch one after another. Default 500 ms. */
+  sendMs?: number;
 }
 
 export interface FakeTcOptions {
   clock: FakeClock;
   /** Scopes the key has. Default: all five. */
   scopes?: string[];
-  /** How long after a change its webhooks arrive. Default 5 s. */
+  /** How long after a change its webhooks arrive. Default 5 s. Ignored with `dispatcher`. */
   deliveryDelayMs?: number;
+  /** Deliver like TC's dispatcher instead: batches of 8 a minute, oldest first. */
+  dispatcher?: FakeDispatcher;
+  /** Every API call takes this long on the virtual clock. Default 0. */
+  requestMs?: number;
   /** Return true to never deliver this event. */
   drop?: (type: string, job: Job, changes: Record<string, unknown>) => boolean;
   /** A bug to test: PATCH works after ASSIGNED (TC must answer 409 JOB_LOCKED). */
@@ -62,6 +85,8 @@ export interface FakeTcOptions {
   healthDown?: boolean;
   /** A bug to test: a sandbox cancel after an installer is assigned says fee_applied: true. */
   feeAfterAssigned?: boolean;
+  /** A bug to test: the cancel answer reports this previous_status instead of the real one. */
+  cancelPreviousStatus?: string;
 }
 
 const SCOPE_OF: Array<[RegExp, string, string]> = [
@@ -89,11 +114,15 @@ export class FakeTc {
   #idempotency = new Map<string, { body: string; jobId: string }>();
   #micros = 0;
   #requestNo = 0;
+  /** Dispatcher shape only: the next run, and the batch it is sending. */
+  #nextRun: number;
+  readonly #inFlight: Array<{ delivery: Pending; arriveAt: number }> = [];
   retryProbe: RetryProbe | null = null;
 
   constructor(options: FakeTcOptions) {
     this.clock = options.clock;
     this.options = options;
+    this.#nextRun = options.clock.now() + (options.dispatcher?.firstRunMs ?? 0);
   }
 
   /** An existing job that is NOT the check's: the check must never change it. */
@@ -121,7 +150,7 @@ export class FakeTc {
       type,
       job: structuredClone(job),
       changes,
-      deliverAt: this.clock.now() + (this.options.deliveryDelayMs ?? 5_000),
+      deliverAt: this.clock.now() + (this.options.dispatcher ? 0 : (this.options.deliveryDelayMs ?? 5_000)),
     });
   }
 
@@ -141,34 +170,66 @@ export class FakeTc {
 
   /** Delivers everything due into the store, through the retry probe like the real listener. */
   async deliverDue(store: EventStore): Promise<void> {
+    if (this.options.dispatcher) return this.#dispatch(store, this.options.dispatcher);
     const now = this.clock.now();
     const due = this.pending.filter((p) => p.deliverAt <= now).sort((a, b) => a.deliverAt - b.deliverAt);
     for (const delivery of due) {
       this.pending.splice(this.pending.indexOf(delivery), 1);
-      if (this.retryProbe?.take("sandbox", delivery.job.id, delivery.webhookId)) {
-        this.refused.push(delivery);
-        await store.recordRejected({ environment: "sandbox", webhookId: delivery.webhookId, reason: "retry_test", message: "500 on purpose" });
-        // TC retries a failed delivery after one minute.
-        if (!this.options.neverRetry) this.pending.push({ ...delivery, deliverAt: now + 60_000 });
-        continue;
-      }
-      const envelope = tcEnvelope({
-        eventId: delivery.webhookId,
-        type: delivery.type,
-        job: delivery.job,
-        changes: delivery.changes,
-        createdAt: new Date(delivery.deliverAt).toISOString(),
-      });
-      const rawBody = JSON.stringify(envelope);
-      await store.recordVerified({
-        environment: "sandbox",
-        webhookId: delivery.webhookId,
-        envelope: envelope as unknown as WebhookEnvelope,
-        rawBody,
-        receivedAt: new Date(now),
-      });
-      this.delivered.push(delivery);
+      await this.#deliverOne(store, delivery, now);
     }
+  }
+
+  /** TC's shape: each run up to now claims the oldest due deliveries (at most perRun) and sends them. */
+  async #dispatch(store: EventStore, shape: FakeDispatcher): Promise<void> {
+    const everyMs = shape.everyMs ?? 60_000;
+    const perRun = shape.perRun ?? 8;
+    const sendMs = shape.sendMs ?? 500;
+    for (;;) {
+      const now = this.clock.now();
+      const arrived = this.#inFlight.filter((f) => f.arriveAt <= now).sort((a, b) => a.arriveAt - b.arriveAt);
+      for (const flight of arrived) {
+        this.#inFlight.splice(this.#inFlight.indexOf(flight), 1);
+        await this.#deliverOne(store, flight.delivery, flight.arriveAt);
+      }
+      if (this.#nextRun > now) return;
+      const run = this.#nextRun;
+      this.#nextRun += everyMs;
+      // Oldest first (by when due, then by when queued: the sort is stable).
+      const batch = this.pending
+        .filter((p) => p.deliverAt <= run)
+        .sort((a, b) => a.deliverAt - b.deliverAt)
+        .slice(0, perRun);
+      batch.forEach((delivery, i) => {
+        this.pending.splice(this.pending.indexOf(delivery), 1);
+        this.#inFlight.push({ delivery, arriveAt: run + (i + 1) * sendMs });
+      });
+    }
+  }
+
+  async #deliverOne(store: EventStore, delivery: Pending, at: number): Promise<void> {
+    if (this.retryProbe?.take("sandbox", delivery.job.id, delivery.webhookId)) {
+      this.refused.push(delivery);
+      await store.recordRejected({ environment: "sandbox", webhookId: delivery.webhookId, reason: "retry_test", message: "500 on purpose" });
+      // TC retries a failed delivery one minute after the attempt.
+      if (!this.options.neverRetry) this.pending.push({ ...delivery, deliverAt: at + 60_000 });
+      return;
+    }
+    const envelope = tcEnvelope({
+      eventId: delivery.webhookId,
+      type: delivery.type,
+      job: delivery.job,
+      changes: delivery.changes,
+      createdAt: new Date(delivery.deliverAt).toISOString(),
+    });
+    const rawBody = JSON.stringify(envelope);
+    await store.recordVerified({
+      environment: "sandbox",
+      webhookId: delivery.webhookId,
+      envelope: envelope as unknown as WebhookEnvelope,
+      rawBody,
+      receivedAt: new Date(at),
+    });
+    this.delivered.push(delivery);
   }
 
   /** An event source that delivers what is due, then reads the real store. */
@@ -253,6 +314,7 @@ export class FakeTc {
     const path = url.pathname.replace(new URL(FAKE_BASE).pathname, "");
     const route = `${method} ${path}`;
     this.requests.push(route);
+    if (this.options.requestMs) this.clock.advance(this.options.requestMs);
     this.authorizations.add(headers.get("authorization"));
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : {};
 
@@ -402,7 +464,7 @@ export class FakeTc {
         success: true,
         job_id: job.id,
         status: "CANCELLED",
-        previous_status: previous,
+        previous_status: this.options.cancelPreviousStatus ?? previous,
         cancelled_by_role: "CLIENT",
         fee_applied: feeApplied,
         fee_amount_cents: 0,
