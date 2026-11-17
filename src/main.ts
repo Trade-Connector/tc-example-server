@@ -5,8 +5,9 @@ import type { Server } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ConfigError, loadConfig, loadDotEnv, type Config } from "./config.ts";
-import { keyPrefix, log, registerSecret } from "./log.ts";
+import { keyPrefix, log, registerSecret, setLogLevel } from "./log.ts";
 import { createConsoleServer } from "./server/console-server.ts";
+import { urlHostFor } from "./server/http-util.ts";
 import { Coverage } from "./server/coverage.ts";
 import { LiveGuard } from "./server/live-guard.ts";
 import { createWebhookServer, WEBHOOK_PATHS } from "./server/webhook-listener.ts";
@@ -44,7 +45,7 @@ function banner(config: Config, consoleUrl: string, webhookPort: number): string
     `    ${consoleUrl}`,
     "",
     `  Webhook listener on ${config.webhookHost}:${webhookPort}. Expose ONLY this port, for example:`,
-    `    cloudflared tunnel --url http://localhost:${webhookPort}`,
+    `    cloudflared tunnel --url http://${urlHostFor(config.webhookHost)}:${webhookPort}`,
     `  Then add these endpoint URLs in TC (Settings → API & Webhooks → Webhooks):`,
     `    sandbox: ${publicBase}${WEBHOOK_PATHS.sandbox}  (${secret(config.test.webhookSecret)})`,
     `    live:    ${publicBase}${WEBHOOK_PATHS.live}  (${secret(config.live.webhookSecret)})`,
@@ -55,6 +56,8 @@ function banner(config: Config, consoleUrl: string, webhookPort: number): string
 async function main(): Promise<void> {
   loadDotEnv();
   const config = loadConfig();
+  // Only now: LOG_LEVEL may come from .env, which loadDotEnv() has just read.
+  setLogLevel(config.logLevel);
   for (const secret of [config.test.apiKey, config.test.webhookSecret, config.live.apiKey, config.live.webhookSecret]) {
     registerSecret(secret);
   }
@@ -86,8 +89,7 @@ async function main(): Promise<void> {
 
   const webhookPort = await listen(webhookServer, config.webhookPort, config.webhookHost);
   const consolePort = await listen(consoleServer, config.consolePort, config.consoleHost);
-  const shownHost = config.consoleExposed ? config.consoleHost : "127.0.0.1";
-  const consoleUrl = `http://${shownHost}:${consolePort}/#token=${token}`;
+  const consoleUrl = `http://${urlHostFor(config.consoleHost)}:${consolePort}/#token=${token}`;
   process.stdout.write(banner(config, consoleUrl, webhookPort) + "\n");
 
   let stopping = false;

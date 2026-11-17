@@ -53,7 +53,7 @@ For how the API itself works (keys, errors, statuses, cancellation, webhooks), r
 4. **Expose only the webhook port.** In a second terminal:
 
    ```sh
-   cloudflared tunnel --url http://localhost:3001
+   cloudflared tunnel --url http://127.0.0.1:3001
    ```
 
    It prints an address like `https://example-name.trycloudflare.com`. Never tunnel port 3000 (the console).
@@ -124,7 +124,9 @@ The server refuses to start if a `tc_live_` key is in a test setting or a `tc_te
 - They never reach the browser. The console shows only a prefix such as `tc_test_ab12…`.
 - They are never logged and never written to `data/`. The logger masks anything shaped like a key or secret.
 - The console listens on `127.0.0.1` only, checks the `Host` header (against DNS rebinding) and needs the per-run
-  token on every call. Only the webhook port should ever be reachable from the internet.
+  token on every call. Only the webhook port should ever be reachable from the internet, through your tunnel.
+- The webhook listener also listens on `127.0.0.1` only (`WEBHOOK_HOST`), so only the tunnel on your machine can
+  reach it. Set `WEBHOOK_HOST=0.0.0.0` only if the tunnel runs on another machine.
 - To rotate a key, use TC's two-active-keys rule: create the new key, put it in `.env`, restart, check it works,
   then revoke the old key. To rotate a webhook secret, rotate it in TC, put the new secret in `.env` and restart:
   for 24 hours TC signs with both secrets, so no delivery is lost while you switch.
@@ -144,7 +146,7 @@ src/
 public/            The console page: index.html, app.js, styles.css (no build step)
 test/              node:test suites; helpers/tc-signer.ts signs like TC does
 docs/              The integration guide and notes on API versions
-data/              Received events, job snapshots, coverage (git-ignored, created on start)
+data/              Received events, refused deliveries, job snapshots, coverage (git-ignored, created on start)
 ```
 
 ## Using the code in your own system
@@ -164,7 +166,7 @@ data/              Received events, job snapshots, coverage (git-ignored, create
 
 | Command | What it does |
 | --- | --- |
-| `npm start` | Starts the webhook listener (port 3001) and the console (127.0.0.1:3000). |
+| `npm start` | Starts the webhook listener (127.0.0.1:3001) and the console (127.0.0.1:3000). |
 | `npm run demo` | Walks one sandbox job through its life. Add `-- --cancel` for the cancel path, `-- --pause=5000` to slow it down. |
 | `npm test` | Runs the tests. They make no network calls. |
 | `npm run typecheck` | Type-checks with `tsc`. |

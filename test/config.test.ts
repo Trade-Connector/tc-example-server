@@ -39,8 +39,18 @@ describe("loadConfig", () => {
     assert.equal(config.consoleHost, "127.0.0.1");
     assert.equal(config.consolePort, 3000);
     assert.equal(config.webhookPort, 3001);
+    assert.equal(config.webhookHost, "127.0.0.1", "the tunnel reaches loopback; nothing else on the network should");
     assert.equal(config.consoleExposed, false);
     assert.equal(config.liveAvailable, false);
+    assert.equal(config.logLevel, "info");
+  });
+
+  it("reads LOG_LEVEL, and warns (rather than silently logging everything) on an unknown value", () => {
+    assert.equal(loadConfig({ LOG_LEVEL: "error" }).logLevel, "error");
+    assert.equal(loadConfig({ LOG_LEVEL: " WARN " }).logLevel, "warn");
+    const odd = loadConfig({ LOG_LEVEL: "loud" });
+    assert.equal(odd.logLevel, "info");
+    assert.ok(odd.warnings.some((w) => w.includes("LOG_LEVEL")));
   });
 
   it("refuses to boot with a live key in the test slot", () => {

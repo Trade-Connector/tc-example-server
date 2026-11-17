@@ -250,7 +250,7 @@ async function loadStatus() {
   $("#wh-live").textContent = base ? s.webhooks.live : `https://<your-tunnel>${s.webhooks.live}`;
   $("#wh-sandbox-secret").replaceChildren(secretBadge(s.keys.sandbox.webhook_secret_configured, "TC_TEST_WEBHOOK_SECRET"));
   $("#wh-live-secret").replaceChildren(secretBadge(s.keys.live.webhook_secret_configured, "TC_LIVE_WEBHOOK_SECRET"));
-  $("#tunnel-cmd").textContent = `cloudflared tunnel --url http://localhost:${s.webhooks.port}`;
+  $("#tunnel-cmd").textContent = `cloudflared tunnel --url ${s.webhooks.local_url}`;
   renderInstallsVisibility();
   renderDetail();
 }

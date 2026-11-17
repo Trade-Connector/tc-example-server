@@ -9,7 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { ConfigError, loadConfig, loadDotEnv } from "./config.ts";
-import { keyPrefix, registerSecret } from "./log.ts";
+import { keyPrefix, redact, registerSecret } from "./log.ts";
 import { TcClient } from "./tc/client.ts";
 import { TcApiError } from "./tc/errors.ts";
 import type { CreateJobRequest, Job, SimulateTarget, TradeType } from "./tc/types.ts";
@@ -18,7 +18,9 @@ const args = process.argv.slice(2);
 const cancelPath = args.includes("--cancel");
 const pauseMs = Number(/^--pause=(\d+)$/.exec(args.find((a) => a.startsWith("--pause=")) ?? "")?.[1] ?? 2000);
 
-const out = (line = "") => process.stdout.write(line + "\n");
+// The demo prints for a person to read rather than logging, but every line still goes through the
+// logger's masking, so a key or webhook secret can never reach the terminal.
+const out = (line = "") => process.stdout.write(redact(line) + "\n");
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function money(cents: number | null | undefined): string {

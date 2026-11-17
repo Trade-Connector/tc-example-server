@@ -6,6 +6,7 @@
 //   server starts in sandbox; switching to live is a deliberate action in the console.
 // - Webhook secrets must decode, so a mistyped secret fails now rather than at the first delivery.
 
+import { isLogLevel, LOG_LEVELS, type LogLevel } from "./log.ts";
 import { decodeWebhookSecret } from "./webhooks/verify.ts";
 
 // TC may move the API to a custom domain later and will announce it; keep the URL in config (TC_BASE_URL).
@@ -42,6 +43,8 @@ export interface Config {
   /** Optional: your tunnel's public URL, so the console can show the full webhook URLs. */
   publicWebhookBaseUrl: string | null;
   dataDir: string;
+  /** From LOG_LEVEL (debug, info, warn or error); info when unset or unknown. */
+  logLevel: LogLevel;
   /** Problems worth printing at start-up that do not stop the server. */
   warnings: string[];
 }
@@ -140,6 +143,12 @@ export function loadConfig(env: Env = process.env): Config {
     );
   }
 
+  const rawLogLevel = clean(env.LOG_LEVEL)?.toLowerCase() ?? "info";
+  const logLevel: LogLevel = isLogLevel(rawLogLevel) ? rawLogLevel : "info";
+  if (!isLogLevel(rawLogLevel)) {
+    warnings.push(`LOG_LEVEL "${env.LOG_LEVEL}" is not one of ${LOG_LEVELS.join(", ")}; using info.`);
+  }
+
   const publicWebhookBaseUrl = clean(env.PUBLIC_WEBHOOK_BASE_URL)?.replace(/\/+$/, "") ?? null;
   if (publicWebhookBaseUrl && !publicWebhookBaseUrl.startsWith("https://")) {
     warnings.push("PUBLIC_WEBHOOK_BASE_URL should start with https:// (TC only delivers to HTTPS URLs).");
@@ -154,10 +163,13 @@ export function loadConfig(env: Env = process.env): Config {
     consoleHost,
     consolePort: port(env, "CONSOLE_PORT", 3000),
     consoleExposed,
-    webhookHost: clean(env.WEBHOOK_HOST) ?? "0.0.0.0",
+    // Loopback by default: the tunnel (cloudflared on this machine) reaches it there, and nothing
+    // else on the network can post to it. Use 0.0.0.0 only if the tunnel runs on another machine.
+    webhookHost: clean(env.WEBHOOK_HOST) ?? "127.0.0.1",
     webhookPort: port(env, "WEBHOOK_PORT", 3001),
     publicWebhookBaseUrl,
     dataDir: clean(env.DATA_DIR) ?? "data",
+    logLevel,
     warnings,
   };
 }

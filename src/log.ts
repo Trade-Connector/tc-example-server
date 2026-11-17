@@ -4,7 +4,12 @@
 // secret, and also every exact secret value registered with registerSecret(). Show a key's
 // prefix (keyPrefix()) when you need to say which key is in use.
 
-export type LogLevel = "debug" | "info" | "warn" | "error";
+export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
+export type LogLevel = (typeof LOG_LEVELS)[number];
+
+export function isLogLevel(value: unknown): value is LogLevel {
+  return (LOG_LEVELS as readonly unknown[]).includes(value);
+}
 export type LogSink = (level: LogLevel, line: string) => void;
 
 // Five or more characters after the prefix, so an already-shortened "tc_test_ab12…" is left alone.
@@ -46,7 +51,8 @@ let sink: LogSink = (level, line) => {
   if (level === "error" || level === "warn") process.stderr.write(line + "\n");
   else process.stdout.write(line + "\n");
 };
-let minLevel: LogLevel = (process.env.LOG_LEVEL as LogLevel | undefined) ?? "info";
+// Set from LOG_LEVEL by main.ts once .env is loaded (see config.ts); "info" until then.
+let minLevel: LogLevel = "info";
 
 const ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
@@ -58,6 +64,7 @@ export function setLogSink(next: LogSink): LogSink {
 }
 
 export function setLogLevel(level: LogLevel): void {
+  if (!isLogLevel(level)) throw new Error(`Unknown log level "${String(level)}" (use ${LOG_LEVELS.join(", ")})`);
   minLevel = level;
 }
 

@@ -1,5 +1,6 @@
 // The webhook listener: the ONLY port you expose to the internet (for example with
-// `cloudflared tunnel --url http://localhost:3001`).
+// `cloudflared tunnel --url http://127.0.0.1:3001`). It listens on loopback by default
+// (WEBHOOK_HOST), so only the tunnel on this machine can reach it.
 //
 // It serves exactly two routes and answers 404 to everything else:
 //   POST /webhooks/tc/sandbox   verified with TC_TEST_WEBHOOK_SECRET

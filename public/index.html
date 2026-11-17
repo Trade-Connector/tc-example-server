@@ -30,7 +30,7 @@
       <summary>Webhook URLs to paste into TC</summary>
       <div class="webhook-help">
         <p>Expose <strong>only</strong> the webhook port with a tunnel, for example
-          <code id="tunnel-cmd">cloudflared tunnel --url http://localhost:3001</code>, then add these as endpoints in the
+          <code id="tunnel-cmd">cloudflared tunnel --url http://127.0.0.1:3001</code>, then add these as endpoints in the
           TC web app (Settings → API &amp; Webhooks → Webhooks). Put each endpoint's <code>whsec_…</code> secret in <code>.env</code>.</p>
         <table class="kv">
           <tr><th>Sandbox endpoint</th><td class="mono" id="wh-sandbox"></td><td id="wh-sandbox-secret"></td></tr>

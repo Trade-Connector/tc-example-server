@@ -24,6 +24,7 @@ import {
 import type { EventStore } from "../webhooks/store.ts";
 import type { Coverage } from "./coverage.ts";
 import { GuardError, type ConsoleEnvironment, type LiveAction, type LiveGuard } from "./live-guard.ts";
+import { urlHostFor } from "./http-util.ts";
 import { WEBHOOK_PATHS } from "./webhook-listener.ts";
 
 export interface ConsoleContext {
@@ -162,6 +163,8 @@ route(
       },
       webhooks: {
         port: config.webhookPort,
+        /** What to point the tunnel at. */
+        local_url: `http://${urlHostFor(config.webhookHost)}:${config.webhookPort}`,
         public_base_url: base,
         sandbox: base ? base + WEBHOOK_PATHS.sandbox : WEBHOOK_PATHS.sandbox,
         live: base ? base + WEBHOOK_PATHS.live : WEBHOOK_PATHS.live,

@@ -85,3 +85,14 @@ export function queryOf(req: IncomingMessage): URLSearchParams {
   const q = raw.indexOf("?");
   return new URLSearchParams(q === -1 ? "" : raw.slice(q + 1));
 }
+
+/**
+ * The host to put in a URL for a server bound to `bindHost`, so that the URL both connects and
+ * passes the console's Host check: a wildcard bind is reached on loopback, and an IPv6 address goes
+ * in brackets. (127.0.0.1 is NOT right for every bind: a server on ::1 alone refuses it.)
+ */
+export function urlHostFor(bindHost: string): string {
+  if (bindHost === "0.0.0.0") return "127.0.0.1";
+  if (bindHost === "::") return "[::1]";
+  return bindHost.includes(":") ? `[${bindHost}]` : bindHost;
+}
