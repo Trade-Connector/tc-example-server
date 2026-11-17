@@ -3,17 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>TC example console</title>
+  <title>Trade Connector API Console</title>
+  <link rel="icon" href="/brand/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/brand/brand.css">
   <link rel="stylesheet" href="/styles.css">
-  <script src="/app.js" defer></script>
+  <script type="module" src="/app.js"></script>
 </head>
 <body>
   <div id="live-banner" class="live-banner" hidden>
-    LIVE MODE: real jobs reach real installers, and cancelling can cost money. Every write asks you to type LIVE.
+    LIVE MODE: real jobs reach real installers, and a cancellation fee may apply under your company's cancellation terms with Trade Connector. Every write asks you to type LIVE.
   </div>
 
   <header class="topbar">
-    <div class="brand">Trade Connector <span>example console</span></div>
+    <div class="brand"><img src="/brand/icon.svg" alt="" width="30" height="30"> Trade Connector <span>API Console</span></div>
     <div class="env-switch" role="group" aria-label="Environment">
       <button type="button" id="env-sandbox" class="env-btn">Sandbox</button>
       <button type="button" id="env-live" class="env-btn">Live</button>
@@ -51,6 +53,7 @@
     <button type="button" data-tab="webhooks">Webhooks <span id="event-count" class="count"></span></button>
     <button type="button" data-tab="reference">Reference data</button>
     <button type="button" data-tab="installs">Installs</button>
+    <button type="button" data-tab="check">Sandbox check</button>
     <button type="button" data-tab="coverage">Test coverage</button>
   </nav>
 
@@ -59,31 +62,13 @@
     <section id="tab-jobs" class="tab">
       <div class="jobs-layout">
         <div class="col-list">
-          <form id="job-filter" class="card filter">
-            <label>Status
-              <select name="status" id="filter-status"><option value="">any</option></select>
-            </label>
-            <label>Updated since
-              <input type="datetime-local" name="updated_since" step="1">
-            </label>
-            <label>Per page
-              <select name="limit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select>
-            </label>
-            <button type="submit">List jobs</button>
-          </form>
-
-          <form id="ext-lookup" class="card filter">
-            <label class="grow">Look up by your reference
-              <span class="prefixed"><span>ext:</span><input type="text" name="ref" placeholder="EX-2026-11-17-ab12cd34" required></span>
-            </label>
-            <button type="submit">Open</button>
-          </form>
-
           <details id="create-card" class="card">
             <summary>New job</summary>
             <form id="create-form" class="form-grid">
-              <p class="hint wide">Prefilled with obviously fake example data. Reference lists need the <code>reference:read</code> scope.
-                <button type="button" id="create-load-ref" class="small">Load reference data</button></p>
+              <p class="hint wide">Prefilled with obviously fake example data. Job types, trades and accreditations load by themselves
+                (they need the <code>reference:read</code> scope).
+                <button type="button" id="create-load-ref" class="small outline">Reload reference data</button></p>
+              <div class="wide" id="create-ref-result"></div>
               <label class="wide">Title <input name="title" required maxlength="255"></label>
               <label class="wide">Description <textarea name="description" rows="2" required maxlength="10000"></textarea></label>
               <label class="wide">Address <input name="address" required maxlength="500"></label>
@@ -101,8 +86,8 @@
               <label>Urgency
                 <select name="urgency"><option>LOW</option><option selected>NORMAL</option><option>HIGH</option><option>URGENT</option><option>EMERGENCY</option></select>
               </label>
-              <fieldset class="wide picklist"><legend>Trades (first ticked is primary)</legend><div id="create-trades" class="muted">Load reference data to pick trades. Optional.</div></fieldset>
-              <fieldset class="wide picklist"><legend>Accreditations required</legend><div id="create-accreditations" class="muted">Load reference data to pick accreditations. Optional.</div></fieldset>
+              <fieldset class="wide picklist"><legend>Trades (first ticked is primary)</legend><div id="create-trades" class="options muted">Loading reference data…</div></fieldset>
+              <fieldset class="wide picklist"><legend>Accreditations required</legend><div id="create-accreditations-bar" class="picklist-bar"></div><div id="create-accreditations" class="options muted">Loading reference data…</div></fieldset>
               <label>Preferred start <input type="date" name="preferred_start_date"></label>
               <label>Time window
                 <input name="time_window" list="time-windows" placeholder="MORNING or 08:00-12:00">
@@ -126,26 +111,44 @@
                 <label><input type="radio" name="publish" value="true"> Publish (OPEN)</label>
               </fieldset>
               <div class="wide actions">
-                <button type="submit" class="primary">Create job</button>
+                <button type="submit" class="primary" id="create-submit">Create job</button>
                 <button type="button" id="create-fresh">Fresh reference and key</button>
-                <span class="hint">Send the same Idempotency-Key and body again to see TC replay the original job.</span>
+                <span class="hint">Press Create again with the same Idempotency-Key and body to see TC replay the original job.</span>
               </div>
               <div class="wide" id="create-result"></div>
             </form>
           </details>
 
-          <div class="card">
+          <section class="card" aria-labelledby="jobs-list-title">
+            <h2 class="panel-title" id="jobs-list-title">Jobs</h2>
+            <form id="job-filter" class="filter">
+              <label>Status
+                <select name="status" id="filter-status"><option value="">any</option></select>
+              </label>
+              <label>Updated since
+                <input type="datetime-local" name="updated_since" step="1">
+              </label>
+              <label>Per page
+                <select name="limit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select>
+              </label>
+              <button type="submit" id="list-submit">List jobs</button>
+            </form>
+            <form id="ext-lookup" class="filter">
+              <label class="grow">Open by your reference
+                <span class="prefixed"><span>ext:</span><input type="text" name="ref" placeholder="EX-2026-11-17-ab12cd34" required></span>
+              </label>
+              <button type="submit" id="ext-submit">Open</button>
+            </form>
+            <div id="ext-result"></div>
             <table class="list" id="jobs-table">
               <thead><tr><th>Reference</th><th>Title</th><th>Status</th><th>Updated</th></tr></thead>
-              <tbody><tr><td colspan="4" class="muted">Press “List jobs”.</td></tr></tbody>
+              <tbody><tr><td colspan="4" class="muted">Loading jobs…</td></tr></tbody>
             </table>
             <div class="actions"><button type="button" id="load-more" hidden>Load more</button><span id="list-result"></span></div>
-          </div>
+          </section>
         </div>
 
-        <div class="col-detail" id="job-detail">
-          <div class="card muted">Pick a job, create one, or look one up by reference.</div>
-        </div>
+        <div class="col-detail" id="job-detail" aria-live="polite"></div>
       </div>
     </section>
 
@@ -167,7 +170,7 @@
       <div class="card">
         <p>Job types, trade types and accreditations to use when creating jobs. These routes need the
           <code>reference:read</code> scope, which new keys do not get by default.</p>
-        <button type="button" id="ref-load">Load reference data</button>
+        <button type="button" id="ref-load" class="outline">Reload reference data</button>
         <div id="ref-result"></div>
       </div>
       <div class="ref-grid">
@@ -189,7 +192,7 @@
           <label>Serial <input name="serial"></label>
           <label>Status <input name="status" placeholder="e.g. REGISTERED,VERIFIED"></label>
           <label>Updated since <input type="datetime-local" name="updated_since" step="1"></label>
-          <button type="submit">List installs</button>
+          <button type="submit" id="installs-submit">List installs</button>
         </form>
         <div class="card">
           <table class="list" id="installs-table">
@@ -213,18 +216,33 @@
             <label>Homeowner name <input name="homeowner_name"></label>
             <label>Homeowner email <input name="homeowner_email"></label>
             <label>Your reference <input name="external_reference"></label>
-            <div class="wide actions"><button type="submit" class="danger">Save install (LIVE)</button></div>
+            <div class="wide actions"><button type="submit" class="danger" id="install-submit">Save install (LIVE)</button></div>
             <div class="wide" id="install-form-result"></div>
           </form>
         </details>
       </div>
     </section>
 
+    <!-- Sandbox check -------------------------------------------------------------------- -->
+    <section id="tab-check" class="tab" hidden>
+      <div class="card">
+        <h2 class="panel-title">Sandbox check <span class="tag">sandbox only</span></h2>
+        <p>Runs every Partner API call and every webhook against the sandbox, with two jobs it creates itself
+          (<code>CHECK-…-A</code> and <code>-B</code>). It never changes your other jobs. It takes a few minutes, because it
+          waits for each webhook (TC sends within about a minute). The same check runs in a terminal:
+          <code>npm run check:sandbox</code>.</p>
+        <div id="check-controls" class="check-controls"></div>
+        <div id="check-message"></div>
+      </div>
+      <div id="check-view"></div>
+    </section>
+
     <!-- Coverage ------------------------------------------------------------------------- -->
     <section id="tab-coverage" class="tab" hidden>
       <div class="card">
         <p>Every Partner API operation and webhook event type, ticked when it succeeded or arrived. Kept in
-          <code>data/coverage.json</code> until you reset it. <span id="coverage-started" class="muted"></span></p>
+          <code>data/coverage.json</code> until you reset it. The sandbox check ticks it too.
+          <span id="coverage-started" class="muted"></span></p>
         <button type="button" id="coverage-reset">Reset checklist</button>
       </div>
       <div class="card"><h3>API operations</h3><div id="coverage-endpoints"></div></div>

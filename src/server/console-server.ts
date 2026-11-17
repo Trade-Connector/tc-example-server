@@ -21,7 +21,12 @@ const STATIC_FILES: Record<string, { file: string; type: string }> = {
   "/": { file: "index.html", type: "text/html; charset=utf-8" },
   "/index.html": { file: "index.html", type: "text/html; charset=utf-8" },
   "/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
+  "/lib/ui-state.js": { file: "lib/ui-state.js", type: "text/javascript; charset=utf-8" },
+  "/lib/check-view.js": { file: "lib/check-view.js", type: "text/javascript; charset=utf-8" },
   "/styles.css": { file: "styles.css", type: "text/css; charset=utf-8" },
+  // The brand, kept in one folder so it can be swapped (see README).
+  "/brand/brand.css": { file: "brand/brand.css", type: "text/css; charset=utf-8" },
+  "/brand/icon.svg": { file: "brand/icon.svg", type: "image/svg+xml" },
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
