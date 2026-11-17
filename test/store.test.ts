@@ -93,14 +93,41 @@ describe("EventStore", () => {
     assert.equal(again.getSnapshot("sandbox", job.id)?.job.status, "SCHEDULED");
   });
 
-  it("waits for an in-flight copy of the same webhook-id instead of racing it", async () => {
-    const store = await EventStore.open(path.join(dir, "same-id-concurrent"));
+  it("never waves a copy through as a duplicate while the first attempt at that webhook-id is failing", async () => {
+    const storeDir = path.join(dir, "same-id-first-fails");
+    const store = await EventStore.open(storeDir);
     const job = sampleJob({ status: "ASSIGNED", updated_at: "2026-11-17T05:00:00.000Z" });
     const d = { environment: "sandbox" as const, webhookId: "evt_twice", ...envelope("evt_twice", "job.assigned", job) };
-    const [first, second] = await Promise.all([store.recordVerified(d), store.recordVerified(d)]);
-    assert.equal(first.flags.duplicate, false);
-    assert.equal(second.flags.duplicate, true);
+
+    // Every write fails while the snapshot file is blocked, so every copy must fail (TC gets 500 and
+    // retries). None may be answered as a "duplicate" of an attempt that never finished.
+    const snapshotFile = path.join(storeDir, "job-snapshots.json");
+    await mkdir(snapshotFile, { recursive: true });
+    const results = await Promise.allSettled([store.recordVerified(d), store.recordVerified(d), store.recordVerified(d)]);
+    assert.deepEqual(results.map((r) => r.status), ["rejected", "rejected", "rejected"]);
+    await rm(snapshotFile, { recursive: true });
+
+    // Nothing is left waiting: the next attempt runs, does the work, and a later copy is a duplicate.
+    const ok = await store.recordVerified(d);
+    assert.equal(ok.flags.duplicate, false);
     assert.equal(store.getSnapshot("sandbox", job.id)?.job.status, "ASSIGNED");
+    assert.equal((await store.recordVerified(d)).flags.duplicate, true);
+  });
+
+  it("keeps every finished webhook-id on disk after a burst, so replays after a restart are duplicates", async () => {
+    const storeDir = path.join(dir, "burst");
+    const store = await EventStore.open(storeDir);
+    const deliveries = Array.from({ length: 10 }, (_, i) => {
+      const job = sampleJob({ id: `00000000-0000-4000-8000-00000000000${i}`, updated_at: "2026-11-17T06:00:00.000Z" });
+      return { environment: "sandbox" as const, webhookId: `evt_burst_${i}`, ...envelope(`evt_burst_${i}`, "job.created", job) };
+    });
+    await Promise.all(deliveries.map((d) => store.recordVerified(d)));
+    await flushJsonWrites();
+
+    const restarted = await EventStore.open(storeDir);
+    for (const d of deliveries) {
+      assert.equal((await restarted.recordVerified(d)).flags.duplicate, true, d.webhookId);
+    }
   });
 
   it("keeps no ghost entry when the event-log write fails: TC's retry is the one recorded", async () => {

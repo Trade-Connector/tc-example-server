@@ -23,14 +23,19 @@ export async function readJsonFile<T>(file: string, fallback: T): Promise<T> {
 
 const queues = new Map<string, Promise<void>>();
 
-export function writeJsonFile(file: string, value: unknown): Promise<void> {
+/**
+ * Queues a write of `value` to `file`. Pass a function to build the value when the write RUNS
+ * rather than when it is queued, for content that must reflect everything finished by then.
+ */
+export function writeJsonFile(file: string, value: unknown | (() => unknown)): Promise<void> {
   const previous = queues.get(file) ?? Promise.resolve();
   const next = previous
     .catch(() => undefined)
     .then(async () => {
       await ensureDataDir(path.dirname(file));
       const tmp = `${file}.${process.pid}.tmp`;
-      await writeFile(tmp, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
+      const data = typeof value === "function" ? (value as () => unknown)() : value;
+      await writeFile(tmp, JSON.stringify(data, null, 2) + "\n", { mode: 0o600 });
       await rename(tmp, file);
     });
   queues.set(file, next);

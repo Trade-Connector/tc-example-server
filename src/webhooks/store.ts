@@ -122,6 +122,10 @@ export class EventStore {
   /** Deliveries being written right now. Never persisted, so a restart can't mistake a delivery
    *  that never finished for a done one. Settles (never rejects) when that attempt ends. */
   #inFlight = new Map<string, Promise<void>>();
+  /** Ids whose snapshot is written and whose event write is under way. Included in any events-file
+   *  write that runs meanwhile, so a burst of deliveries can't drop a finished id from disk. An id
+   *  only gets here after its snapshot is written, so persisting it early never loses an update. */
+  #committing = new Set<string>();
   #snapshots: Record<string, JobSnapshot> = {};
   #listeners = new Set<(event: StoredEvent) => void>();
 
@@ -200,7 +204,6 @@ export class EventStore {
     let snapshotSaved: Promise<void> = Promise.resolve();
     let settle: () => void = () => {};
     if (!flags.duplicate) {
-      this.#inFlight.set(seenKey, new Promise<void>((resolve) => (settle = resolve)));
       const processable = !flags.unknown_type && !flags.environment_mismatch && !flags.test_event;
       if (job && processable && typeof job.id === "string") {
         const applied = this.#applySnapshot(environment, job, type ?? "unknown", webhookId);
@@ -234,9 +237,9 @@ export class EventStore {
     // 500 and TC's retry is processed in full. (Marking an id seen before its work is saved, and
     // persisting that, silently loses the update after a restart.)
     try {
+      if (!flags.duplicate) this.#inFlight.set(seenKey, new Promise<void>((resolve) => (settle = resolve)));
       await snapshotSaved;
       await this.#append(event, flags.duplicate ? null : seenKey);
-      if (!flags.duplicate) this.#seen.add(seenKey);
     } finally {
       if (!flags.duplicate) {
         this.#inFlight.delete(seenKey);
@@ -343,19 +346,22 @@ export class EventStore {
     }
   }
 
-  /** `ownSeenKey`: this delivery's id, saved with its own event so a restart knows it is done. */
+  /** `ownSeenKey`: this delivery's id; it joins `#seen` once this event's write has succeeded. */
   async #append(event: StoredEvent, ownSeenKey: string | null = null): Promise<void> {
     this.#events.push(event);
     if (this.#events.length > MAX_EVENTS) this.#events.splice(0, this.#events.length - MAX_EVENTS);
     if (this.#seen.size > MAX_SEEN_IDS) {
       this.#seen = new Set([...this.#seen].slice(-MAX_SEEN_IDS));
     }
+    if (ownSeenKey) this.#committing.add(ownSeenKey);
     try {
-      await writeJsonFile(this.#eventsFile, {
+      // Built when the write runs (not when it is queued), so it includes every id finished by then.
+      await writeJsonFile(this.#eventsFile, (): PersistedEvents => ({
         next_seq: this.#nextSeq,
         events: this.#events,
-        seen_ids: ownSeenKey ? [...this.#seen, ownSeenKey] : [...this.#seen],
-      } satisfies PersistedEvents);
+        seen_ids: [...this.#seen, ...this.#committing],
+      }));
+      if (ownSeenKey) this.#seen.add(ownSeenKey);
     } catch (error) {
       // The caller answers 500 and TC retries this delivery, so don't keep (or show) this attempt:
       // the retry records it. (A write for another delivery that runs in between may still have
@@ -364,6 +370,8 @@ export class EventStore {
       const index = this.#events.indexOf(event);
       if (index !== -1) this.#events.splice(index, 1);
       throw error;
+    } finally {
+      if (ownSeenKey) this.#committing.delete(ownSeenKey);
     }
     // Tell the console only once the event has been written.
     this.#notify(event);
