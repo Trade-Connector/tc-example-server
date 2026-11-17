@@ -293,6 +293,25 @@ describe("sandbox check: webhooks that do not come", () => {
     assert.match(row.reason!, /status "WORK_COMPLETE" vs "PAID"/);
   });
 
+  it("calls a missing status change missing or queued, not 'the wrong status', when the others matched their own rows", async () => {
+    const h = await runCheck({ fake: { drop: (type, _job, changes) => type === "job.status_changed" && (changes.job_status as { to: string }).to === "PAID" } });
+    const row = h.row("webhooks.a.status_paid");
+    assert.equal(row.status, "fail");
+    assert.doesNotMatch(row.reason!, /arrived, but/);
+    assert.match(row.reason!, /No job\.status_changed → PAID for job A arrived within 4 minutes of the last step/);
+    assert.match(row.reason!, /most likely still queued or failed: TC sends up to 8 a minute per endpoint, oldest first/);
+    assert.doesNotMatch(row.reason!, /is ticked for your sandbox endpoint/);
+  });
+
+  it("doesn't blame the subscription for a type that arrived for the other job", async () => {
+    const h = await runCheck({ fake: { drop: (type, job) => type === "job.assigned" && String(job.external_reference).endsWith("-B") } });
+    const row = h.row("webhooks.b.assigned");
+    assert.equal(row.status, "fail");
+    assert.equal(h.row("webhooks.a.assigned").status, "pass");
+    assert.match(row.reason!, /Your endpoint does receive job\.assigned, so this delivery is most likely still queued or failed/);
+    assert.doesNotMatch(row.reason!, /is ticked for your sandbox endpoint/);
+  });
+
   it("explains a near miss: the right type, but the wrong status inside", async () => {
     // A price change that only lands once the job is OPEN (simulated by dropping the DRAFT one
     // and emitting another at publish).
@@ -496,6 +515,19 @@ describe("sandbox check: TC's batched delivery (8 a minute per endpoint, oldest 
       assert.equal(h.tc.refused.length, 1);
     });
   }
+
+  it("keeps waiting for TC's retry when the refused delivery itself only arrived late", async () => {
+    // TC's first run lands about 5.3 min after the last step and sends everything at once, so the
+    // refusal happens late and TC's retry (a minute later) lands after the normal 6-minute wait.
+    // The retry row must wait until refusal + retry allowance, not stop at the normal deadline.
+    const h = await runCheck({ fake: { dispatcher: { firstRunMs: 336_000, perRun: 50 }, requestMs: 600 }, retries: true });
+    const lastStep = Date.parse(h.row("lifecycle.cancel").finished_at!);
+    assert.equal(h.tc.refused.length, 1, "one delivery refused");
+    assert.equal(h.row("webhooks.retry").status, "pass", h.row("webhooks.retry").reason ?? "");
+    const retryDone = Date.parse(h.row("webhooks.retry").finished_at!);
+    assert.ok(retryDone - lastStep > 6 * 60_000, `the retry row finished ${retryDone - lastStep} ms after the last step, past the normal wait`);
+    assert.deepEqual(statuses(h.run, "fail"), []);
+  });
 
   it("says honestly what it is waiting for while TC's batches come in", async () => {
     const notes: string[] = [];

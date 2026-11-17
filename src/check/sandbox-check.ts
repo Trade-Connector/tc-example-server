@@ -1225,11 +1225,22 @@ class SandboxCheck {
     if (this.#received.length === 0) {
       return `Nothing arrived for the check's jobs within ${wait} of the last step. Is the tunnel running, and does your TC sandbox endpoint point at it (Settings → API & Webhooks → Webhooks)? Check its Deliveries tab for errors.`;
     }
-    const nearMiss = forJob.find((e) => e.event_type === spec.type && !e.flags.duplicate && !SandboxCheck.#matches(spec, e));
+    // A near miss is a delivery of this type for this job that no other row has already claimed. One
+    // that matched its own row (e.g. job.status_changed → OPEN) says nothing about this row's event.
+    const claimed = new Set([...this.#matched.values()].map((e) => e.webhook_id));
+    const nearMiss = forJob.find(
+      (e) => e.event_type === spec.type && !e.flags.duplicate && !claimed.has(e.webhook_id) && !SandboxCheck.#matches(spec, e),
+    );
     if (nearMiss) {
       return `A ${spec.type} arrived, but the job inside it was ${nearMiss.job_status}${spec.to ? ` (changes.job_status.to ${JSON.stringify((nearMiss.changes as { job_status?: { to?: unknown } } | null)?.job_status?.to)})` : ""}, expected ${spec.to ?? spec.jobStatus}.`;
     }
-    return `No ${spec.type}${spec.to ? ` → ${spec.to}` : ""} arrived within ${wait} of the last step, although other events for job ${spec.job} did. TC sends only the event types your endpoint subscribes to: check that ${spec.type} is ticked for your sandbox endpoint (Settings → API & Webhooks → Webhooks).`;
+    const what = `${spec.type}${spec.to ? ` → ${spec.to}` : ""}`;
+    if (this.#received.some((e) => e.event_type === spec.type)) {
+      // This type did arrive (for either job), so the endpoint is subscribed to it: the delivery is
+      // most likely still queued behind others, or failed and is waiting for TC's retry.
+      return `No ${what} for job ${spec.job} arrived within ${wait} of the last step. Your endpoint does receive ${spec.type}, so this delivery is most likely still queued or failed: TC sends up to ${TC_DELIVERIES_PER_RUN} a minute per endpoint, oldest first, including retries of earlier failures. Check the Deliveries tab for your sandbox endpoint (Settings → API & Webhooks → Webhooks).`;
+    }
+    return `No ${what} arrived within ${wait} of the last step, although other events for job ${spec.job} did. TC sends only the event types your endpoint subscribes to: check that ${spec.type} is ticked for your sandbox endpoint (Settings → API & Webhooks → Webhooks).`;
   }
 
   /**
