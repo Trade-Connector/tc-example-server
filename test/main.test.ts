@@ -215,6 +215,30 @@ describe("npm run check:sandbox", () => {
       const saved = JSON.parse(await readFile(path.join(cwd, "data", "sandbox-check-runs.json"), "utf8"));
       assert.equal(saved.runs.length, 1);
       assert.equal(saved.runs[0].source, "cli");
+      const port = /Listening for webhooks on 127\.0\.0\.1:(\d+)/.exec(result.stdout)![1];
+      assert.match(
+        result.stdout.trimEnd().split("\n").at(-1)!,
+        new RegExp(`^The webhook listener on port ${port} has stopped\\. Run npm start to keep receiving deliveries, or stop the tunnel`),
+        "its last line says the port has closed and what to do about the tunnel",
+      );
+    } finally {
+      tc.close();
+    }
+  });
+
+  it("masks key-shaped values in everything it prints", async () => {
+    const tc = await unreachableTc();
+    const cwd = path.join(dir, "check-mask");
+    await mkdir(cwd, { recursive: true });
+    try {
+      // The base URL carries a key-shaped string; the command prints the base URL in its banner.
+      const leaky = `tc_test_${"9f".repeat(24)}`;
+      const leakyUrl = tc.url.replace("/partner-api", `/${leaky}/partner-api`);
+      const result = await run("check-sandbox.ts", cwd, { TC_TEST_API_KEY: TEST_KEY, TC_BASE_URL: leakyUrl, WEBHOOK_PORT: "0", DATA_DIR: path.join(cwd, "data") });
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stdout, /Trade Connector sandbox check using tc_test_1a1a… at https:\/\/127\.0\.0\.1:\d+\/tc_test_9f9f…\/partner-api/, "the banner is printed, masked");
+      assert.ok(!result.stdout.includes(TEST_KEY));
+      assert.ok(!result.stdout.includes(leaky), "a key-shaped value in any printed line is masked");
     } finally {
       tc.close();
     }
@@ -235,6 +259,7 @@ describe("npm run check:sandbox", () => {
       });
       assert.equal(result.code, 1, result.stdout + result.stderr);
       assert.match(result.stdout, /npm start is running, so its webhook listener receives deliveries/);
+      assert.doesNotMatch(result.stdout, /has stopped/, "npm start still owns the port, so nothing closed");
     } finally {
       busy.close();
       tc.close();

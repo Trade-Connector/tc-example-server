@@ -91,11 +91,16 @@ describe("retry probe in the webhook listener", () => {
     probe.disarm();
   });
 
-  it("disarms itself when it expires", async () => {
+  it("disarms itself when it expires: a late delivery is taken normally", async () => {
     probe.arm(CHECK_JOB, 60_000);
     now += 61_000;
-    assert.equal(probe.armed, false);
+    // Straight to a delivery: the listener calls take(), so the expiry must hold there, without
+    // anything reading the armed getter first (which would clear it by another path).
     assert.equal((await deliver("/webhooks/tc/sandbox", "evt-late", CHECK_JOB)).status, 200);
+    assert.equal(probe.refused, null, "nothing refused");
+    const stored = store.listEvents().find((e) => e.webhook_id === "evt-late")!;
+    assert.equal(stored.verified, true, "processed as a normal delivery");
+    assert.equal(probe.armed, false);
   });
 
   it("only arms for a job UUID", () => {

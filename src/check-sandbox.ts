@@ -146,6 +146,13 @@ async function main(): Promise<void> {
   out(formatReport(done));
   out();
   out(`Kept in ${config.dataDir}/sandbox-check-runs.json (run ${run.id}); the console's Sandbox check tab shows it.`);
+  if (ownListener) {
+    // This command's listener has closed. TC may still send to the tunnel (a late delivery or a
+    // retry); with nothing listening, each one fails and counts as a failed delivery for the endpoint.
+    out(
+      `The webhook listener on port ${listenerPort} has stopped. Run npm start to keep receiving deliveries, or stop the tunnel: until one of those, TC's deliveries fail at the tunnel and count as failed deliveries for your endpoint.`,
+    );
+  }
   process.exit(done.summary.failed > 0 ? 1 : 0);
 }
 

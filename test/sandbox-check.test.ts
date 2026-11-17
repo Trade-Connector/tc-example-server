@@ -38,6 +38,7 @@ interface Harness {
   tc: FakeTc;
   clock: FakeClock;
   store: EventStore;
+  probe: RetryProbe | null;
   startedAt: number;
   updates: number;
   row(id: string): CheckRow;
@@ -83,6 +84,7 @@ async function runCheck(
     tc,
     clock,
     store,
+    probe,
     startedAt,
     get updates() {
       return updates;
@@ -133,7 +135,7 @@ describe("sandbox check: a well-behaved sandbox", () => {
 
   it("makes one simulate call per step, in order", () => {
     const simulates = h.tc.requests.filter((r) => r.endsWith("/simulate"));
-    assert.equal(simulates.length, 5);
+    assert.equal(simulates.length, 6, "five for job A, one for job B");
     const bodies = h.row("lifecycle.assigned").exchanges.map((e) => e.request_body);
     assert.deepEqual(bodies, [{ status: "ASSIGNED" }]);
   });
@@ -182,10 +184,18 @@ describe("sandbox check: a well-behaved sandbox", () => {
     assert.match(h.row("webhooks.unexpected").reason!, /^None.*plus 1 extra job\.price_changed/);
   });
 
-  it("cancels the second job free, and keeps the reason", () => {
+  it("cancels the second job after ASSIGNED, free, and keeps the reason", () => {
+    assert.equal(h.row("lifecycle.b_assigned").status, "pass");
+    assert.deepEqual(h.row("lifecycle.b_assigned").exchanges.map((e) => e.request_body), [{ status: "ASSIGNED" }]);
     const row = h.row("lifecycle.cancel");
     assert.equal(row.status, "pass");
-    assert.match(row.reason!, /OPEN → CANCELLED, no fee/);
+    assert.match(row.reason!, /^ASSIGNED → CANCELLED, no fee \(fee_applied false, sandbox\), reason kept$/);
+    const answer = row.exchanges[0]!.response_body as { previous_status: string; fee_applied: boolean };
+    assert.equal(answer.previous_status, "ASSIGNED");
+    assert.equal(answer.fee_applied, false);
+    for (const id of ["webhooks.b.status_assigned", "webhooks.b.assigned", "webhooks.b.status_cancelled", "webhooks.b.cancelled"]) {
+      assert.equal(h.row(id).status, "pass", id);
+    }
   });
 
   it("infers each scope from the calls that need it", () => {
@@ -201,7 +211,8 @@ describe("sandbox check: a well-behaved sandbox", () => {
     assert.ok(a!.steps.every((s) => s.reached));
     assert.deepEqual(a!.steps.find((s) => s.status === "WORK_COMPLETE")!.events.map((e) => e.type), ["job.status_changed", "job.completed", "job.evidence_ready"]);
     assert.ok([...a!.steps, ...b!.steps].flatMap((s) => s.events).every((e) => e.status === "pass"));
-    assert.deepEqual(b!.steps.map((s) => s.status), ["OPEN", "CANCELLED"]);
+    assert.deepEqual(b!.steps.map((s) => s.status), ["OPEN", "ASSIGNED", "CANCELLED"]);
+    assert.deepEqual(b!.steps.find((s) => s.status === "ASSIGNED")!.events.map((e) => e.type), ["job.status_changed", "job.assigned"]);
   });
 
   it("never records the API key", () => {
@@ -220,6 +231,7 @@ describe("sandbox check: webhooks that do not come", () => {
     const row = h.row("webhooks.a.evidence_ready");
     assert.equal(row.status, "fail");
     assert.match(row.reason!, /No job\.evidence_ready arrived within 120 s of the step, although other events for job A did/);
+    assert.match(row.reason!, /TC sends only the event types your endpoint subscribes to: check that job\.evidence_ready is ticked for your sandbox endpoint/);
     assert.deepEqual(statuses(h.run, "fail"), ["webhooks.a.evidence_ready"]);
     const waited = h.clock.now() - h.startedAt;
     assert.ok(waited >= DEFAULT_TIMINGS.batchMs && waited < DEFAULT_TIMINGS.batchMs + 30_000, `waited ${waited} ms`);
@@ -309,10 +321,19 @@ describe("sandbox check: TC errors", () => {
     assert.equal(h.tc.requests.length, 1);
   });
 
-  it("refuses to run with anything but a tc_test_ key", async () => {
+  it("refuses to run with anything but a tc_test_ key, and sends nothing at all", async () => {
     const h = await runCheck({ deps: { apiKey: `tc_live_${"3c".repeat(24)}` } });
     assert.equal(h.row("keys.prefix").status, "fail");
-    assert.deepEqual(h.tc.requests, ["GET /v1/health"], "only the open health route");
+    assert.equal(h.row("keys.health").status, "skipped");
+    assert.deepEqual(h.tc.requests, [], "not even the health route: the client would send the key with it");
+    assert.equal(h.tc.authorizations.size, 0);
+  });
+
+  it("charges nothing for the cancel after ASSIGNED, or fails the row", async () => {
+    const h = await runCheck({ fake: { feeAfterAssigned: true } });
+    const row = h.row("lifecycle.cancel");
+    assert.equal(row.status, "fail");
+    assert.match(row.reason!, /TC applied a cancellation fee to a sandbox job cancelled from ASSIGNED/);
   });
 });
 
@@ -331,6 +352,15 @@ describe("sandbox check: the retry test", () => {
     // The refusal was logged as refused (not received), so the retry was not a duplicate.
     const stored = h.store.listEvents().filter((e) => e.webhook_id === refused.webhookId);
     assert.deepEqual(stored.map((e) => [e.verified, e.flags.duplicate]).sort(), [[false, false], [true, false]]);
+  });
+
+  it("disarms the probe when the run finishes, even when nothing arrived to refuse", async () => {
+    const h = await runCheck({ retries: true, fake: { drop: () => true } });
+    assert.equal(h.row("webhooks.retry").status, "fail");
+    assert.equal(h.tc.refused.length, 0, "nothing was refused");
+    const armedFor = h.clock.now() - h.startedAt;
+    assert.ok(armedFor < 10 * 60_000, `the run ended ${armedFor} ms in, before the probe's own expiry`);
+    assert.equal(h.probe!.armed, false, "disarmed by the end of the run, not left for its expiry");
   });
 
   it("fails the retry row when TC never sends it again", async () => {

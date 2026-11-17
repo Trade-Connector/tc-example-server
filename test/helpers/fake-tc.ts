@@ -60,6 +60,8 @@ export interface FakeTcOptions {
   accreditationTrades?: boolean;
   /** The health route fails (no response). */
   healthDown?: boolean;
+  /** A bug to test: a sandbox cancel after an installer is assigned says fee_applied: true. */
+  feeAfterAssigned?: boolean;
 }
 
 const SCOPE_OF: Array<[RegExp, string, string]> = [
@@ -392,6 +394,7 @@ export class FakeTc {
     if (method === "POST" && rest === "/cancel") {
       if (["WORK_COMPLETE", "PAID", "CANCELLED", "DISPUTED"].includes(job.status)) return this.#error(409, "JOB_LOCKED", "Job cannot be cancelled");
       const previous = job.status;
+      const feeApplied = this.options.feeAfterAssigned === true && !["DRAFT", "OPEN", "OFFERED"].includes(previous);
       job.cancellation_reason = typeof body.reason === "string" ? body.reason : null;
       job.cancelled_at = this.#stamp();
       this.#setStatus(job, "CANCELLED");
@@ -401,7 +404,7 @@ export class FakeTc {
         status: "CANCELLED",
         previous_status: previous,
         cancelled_by_role: "CLIENT",
-        fee_applied: false,
+        fee_applied: feeApplied,
         fee_amount_cents: 0,
         gst_cents: 0,
         cancellation_type: "CLEAN",

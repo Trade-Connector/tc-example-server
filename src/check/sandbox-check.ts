@@ -19,7 +19,10 @@
 //   simulate IN_PROGRESS         job.status_changed
 //   simulate WORK_COMPLETE       job.status_changed, job.completed, job.evidence_ready
 //   simulate PAID                job.status_changed
-//   cancel                       job.status_changed, job.cancelled
+//   simulate ASSIGNED (job B)    job.status_changed, job.assigned
+//   cancel (job B, from ASSIGNED) job.status_changed, job.cancelled
+// Job B is cancelled after ASSIGNED on purpose: that is where a fee could apply to a live job, so
+// it shows that a sandbox cancel stays free there too.
 // job.price_changed may also come at other times (TC sends it whenever the client total or GST
 // changes), so an extra one is never reported as unexpected.
 
@@ -181,6 +184,8 @@ export const EXPECTED_EVENTS: readonly ExpectedEvent[] = [
   plainEvent("A", "job.evidence_ready", "WORK_COMPLETE", "lifecycle.work_complete", "simulate"),
   statusChanged("A", "PAID", "lifecycle.paid", "simulate"),
   plainEvent("B", "job.created", "OPEN", "jobs.create_second", "create, published"),
+  statusChanged("B", "ASSIGNED", "lifecycle.b_assigned", "simulate"),
+  plainEvent("B", "job.assigned", "ASSIGNED", "lifecycle.b_assigned", "simulate"),
   statusChanged("B", "CANCELLED", "lifecycle.cancel", "cancel"),
   plainEvent("B", "job.cancelled", "CANCELLED", "lifecycle.cancel", "cancel"),
 ];
@@ -196,8 +201,8 @@ export const MANUAL_ROWS = {
 
 function rowSpecs(options: { testRetries: boolean }): RowSpec[] {
   const specs: RowSpec[] = [
+    { id: "keys.prefix", group: "keys", title: "The key is a sandbox key (tc_test_), checked before any request" },
     { id: "keys.health", group: "keys", title: "API health (GET /v1/health)" },
-    { id: "keys.prefix", group: "keys", title: "The key is a sandbox key (tc_test_)" },
     { id: "keys.webhook_secret", group: "keys", title: "The sandbox webhook secret is set (TC_TEST_WEBHOOK_SECRET)" },
     ...SCOPES.map((scope): RowSpec => ({
       id: `keys.scope.${scope}`,
@@ -223,7 +228,8 @@ function rowSpecs(options: { testRetries: boolean }): RowSpec[] {
     { id: "attachments.upload", group: "attachments", title: "Step 2: PUT a tiny PNG to it" },
     { id: "attachments.complete", group: "attachments", title: "Step 3: complete it as private (is_public false), SITE_PHOTO" },
     ...LIFECYCLE_STEPS.map((s): RowSpec => ({ id: s.rowId, group: "lifecycle", title: `Simulate ${s.target}` })),
-    { id: "lifecycle.cancel", group: "lifecycle", title: "Cancel the second job with a reason (free in the sandbox)" },
+    { id: "lifecycle.b_assigned", group: "lifecycle", title: "Simulate ASSIGNED on the second job" },
+    { id: "lifecycle.cancel", group: "lifecycle", title: "Cancel the second job after ASSIGNED, with a reason (free in the sandbox)" },
     ...EXPECTED_EVENTS.map((e): RowSpec => ({
       id: e.rowId,
       group: "webhooks",
@@ -328,6 +334,7 @@ const LANE_STEPS: Record<"A" | "B", ReadonlyArray<{ status: string; reachedBy: s
   ],
   B: [
     { status: "OPEN", reachedBy: "jobs.create_second" },
+    { status: "ASSIGNED", reachedBy: "lifecycle.b_assigned" },
     { status: "CANCELLED", reachedBy: "lifecycle.cancel" },
   ],
 };
@@ -681,20 +688,22 @@ class SandboxCheck {
       this.#lastSeq = this.run.start_seq;
       this.#emit(null);
 
+      // The key's prefix first, before any request: the client sends the key with every call, so a
+      // live key must never reach even the health route.
+      const sandboxKey = await this.#step("keys.prefix", async () => {
+        expect(this.#deps.apiKey?.startsWith("tc_test_"), "The sandbox check needs a sandbox key (tc_test_…) in TC_TEST_API_KEY. It never uses a live key, so it sent nothing.");
+        return `${keyPrefix(this.#deps.apiKey)} (sandbox)`;
+      });
+      if (!sandboxKey) {
+        this.#skipRemaining("Skipped: the check runs only with a sandbox key, so nothing was sent to TC.", true);
+        return this.run;
+      }
       const healthy = await this.#step("keys.health", async () => {
         const health = await this.#client.health();
         expect(health?.status === "ok", `TC answered status ${JSON.stringify(health?.status)}, expected "ok".`);
         expect(health.version === "v1", `TC answered API version ${JSON.stringify(health.version)}, expected "v1".`);
         return `ok, API ${health.version}`;
       });
-      const sandboxKey = await this.#step("keys.prefix", async () => {
-        expect(this.#deps.apiKey?.startsWith("tc_test_"), "The sandbox check needs a sandbox key (tc_test_…) in TC_TEST_API_KEY. It never uses a live key.");
-        return `${keyPrefix(this.#deps.apiKey)} (sandbox)`;
-      });
-      if (!sandboxKey) {
-        this.#skipRemaining("Skipped: the check runs only with a sandbox key.", true);
-        return this.run;
-      }
       if (!healthy) {
         this.#skipRemaining("Skipped: TC did not answer the health check, so nothing else was tried.", true);
         return this.run;
@@ -1018,6 +1027,18 @@ class SandboxCheck {
       }
     }
 
+    // Job B: ASSIGNED, then cancelled. A live job can carry a fee once an installer is assigned, so
+    // cancelling after ASSIGNED shows that a sandbox cancel stays free where a fee could apply.
+    const bAssigned = await this.#step(
+      "lifecycle.b_assigned",
+      async () => {
+        const job = await this.#client.simulate(this.#b!.id, "ASSIGNED");
+        this.#setJob("b", job);
+        expect(job.status === "ASSIGNED", `The second job is ${job.status} after simulating ASSIGNED.`);
+        return "ASSIGNED (the cancel comes next)";
+      },
+      this.#b ? null : "Skipped: the second job was not created.",
+    );
     await this.#step(
       "lifecycle.cancel",
       async () => {
@@ -1025,13 +1046,17 @@ class SandboxCheck {
         expect(result?.status === "CANCELLED", `The cancel answered status ${JSON.stringify(result?.status)}, expected CANCELLED.`);
         expect(
           result.fee_applied === false && !result.fee_amount_cents && !result.gst_cents,
-          "TC applied a cancellation fee to a sandbox job (fee_applied is true or the fee fields are not zero). Sandbox cancellations must be free.",
+          `TC applied a cancellation fee to a sandbox job cancelled from ${result.previous_status} (fee_applied is true or the fee fields are not zero). Sandbox cancellations must be free.`,
         );
+        if (bAssigned) {
+          expect(result.previous_status === "ASSIGNED", `previous_status is ${JSON.stringify(result.previous_status)}, expected ASSIGNED.`);
+        }
         const job = await this.#client.getJob(this.#b!.id);
         this.#setJob("b", job);
         expect(job.status === "CANCELLED", `A fresh GET says ${job.status}, expected CANCELLED.`);
         expect(job.cancellation_reason === CANCEL_REASON, `cancellation_reason is ${JSON.stringify(job.cancellation_reason)}, expected ${JSON.stringify(CANCEL_REASON)}.`);
-        return `${result.previous_status} → CANCELLED, no fee (sandbox), reason kept`;
+        const note = bAssigned ? "" : " (it never reached ASSIGNED, so the no-fee rule after assignment was not shown)";
+        return `${result.previous_status} → CANCELLED, no fee (fee_applied false, sandbox), reason kept${note}`;
       },
       this.#b ? null : "Skipped: the second job was not created.",
     );
@@ -1169,7 +1194,7 @@ class SandboxCheck {
     if (nearMiss) {
       return `A ${spec.type} arrived, but the job inside it was ${nearMiss.job_status}${spec.to ? ` (changes.job_status.to ${JSON.stringify((nearMiss.changes as { job_status?: { to?: unknown } } | null)?.job_status?.to)})` : ""}, expected ${spec.to ?? spec.jobStatus}.`;
     }
-    return `No ${spec.type}${spec.to ? ` → ${spec.to}` : ""} arrived within ${wait} of the step, although other events for job ${spec.job} did.`;
+    return `No ${spec.type}${spec.to ? ` → ${spec.to}` : ""} arrived within ${wait} of the step, although other events for job ${spec.job} did. TC sends only the event types your endpoint subscribes to: check that ${spec.type} is ticked for your sandbox endpoint (Settings → API & Webhooks → Webhooks).`;
   }
 
   #retryOn(): boolean {
