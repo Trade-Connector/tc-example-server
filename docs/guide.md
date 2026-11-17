@@ -472,7 +472,8 @@ function verify(rawBody, headers, secret) {
 
 ### Delivery and retries
 
-- Deliveries go out within about a minute, with a 10-second timeout.
+- Deliveries go out in batches, roughly once a minute and a limited number per endpoint per run, so a burst of
+  changes can take a few minutes to arrive. Each delivery has a 10-second timeout.
 - **Any 2xx is success, and TC does not retry a delivery that got one.** So save the event to durable storage
   first, then answer 2xx (well inside the 10-second timeout), then do the slower work from storage. If the save
   fails, answer 5xx so TC retries.

@@ -229,7 +229,7 @@
         <h2 class="panel-title">Sandbox check <span class="tag">sandbox only</span></h2>
         <p>Runs every Partner API call and every webhook against the sandbox, with two jobs it creates itself
           (<code>CHECK-…-A</code> and <code>-B</code>). It never changes your other jobs. It takes a few minutes, because it
-          waits for each webhook (TC sends within about a minute). The same check runs in a terminal:
+          waits for each webhook, and TC sends them in batches of up to 8 a minute. The same check runs in a terminal:
           <code>npm run check:sandbox</code>.</p>
         <div id="check-controls" class="check-controls"></div>
         <div id="check-message"></div>

@@ -106,8 +106,9 @@ first", "Write a note first").
 The **Sandbox check** tab's **Run full sandbox check** button and `npm run check:sandbox` run the same code. It
 uses only the sandbox key: the button is not on the page in live mode, and the command refuses to run without a
 `tc_test_` key. It creates two jobs of its own, `CHECK-<date>-<tag>-A` (the full lifecycle) and `-B` (the cancel
-path), and never changes any other job. It takes a few minutes, because it waits for every webhook (TC sends
-each within about a minute).
+path), and never changes any other job. It takes a few minutes, because it waits for every webhook, and TC sends
+them in batches: up to 8 a minute per endpoint, oldest first. The check's 17 or so events can take about 3 minutes
+to arrive.
 
 | Group | What it checks |
 | --- | --- |
@@ -116,12 +117,13 @@ each within about a minute).
 | Jobs | Create a draft with an `Idempotency-Key`, then the same key and body again (200, the same job); a second, published job; get by id and by `ext:`; list with `updated_since`, one page at a time; PATCH a field and the price; add a note; publish; and a PATCH after ASSIGNED must get `409 JOB_LOCKED`. |
 | Attachments | All three upload steps with a tiny generated PNG, private, `SITE_PHOTO`. |
 | Sandbox lifecycle | Simulate one step per call, OPEN → ASSIGNED → SCHEDULED → IN_PROGRESS → WORK_COMPLETE → PAID; simulate the second job to ASSIGNED, then cancel it with a reason (CANCELLED, and `fee_applied` false: a sandbox cancel stays free after an installer is assigned, too). |
-| Webhooks | Every event those steps should send (worked out from TC's event triggers) arrives, signature verified, with the right job and status; the last copy of each job matches a fresh `GET`; and nothing unexpected arrived. Waits up to 2 minutes per step. |
+| Webhooks | Every event those steps should send (worked out from TC's event triggers) arrives, signature verified, with the right job and status; the last copy of each job matches a fresh `GET`; and nothing unexpected arrived. Waits from the last step: a minute for every 8 expected deliveries, plus one more (4 minutes for this check, 6 with the retry test), and shows how many have arrived so far. |
 | Security | A forged signature and an unsigned delivery, posted to this server's own listener, both get 401. |
 
-**Also test TC retries** (a tick box; adds about 2 minutes): the listener answers 500, once, to the next delivery
-for the check's own job, and the check expects TC to send the same `webhook-id` again about a minute later. The
-switch is sandbox-only, for that one job and one delivery, expires on its own, and never answers 410.
+**Also test TC retries** (a tick box; can add up to 2 minutes): the listener answers 500, once, to the next delivery
+for the check's own job, and the check expects TC to send the same `webhook-id` again. TC tries again a minute after
+the 500 at the earliest, behind any deliveries still queued. The switch is sandbox-only, for that one job and one
+delivery, expires on its own, and never answers 410.
 
 Some things only a person can do. They show amber, not failed, and tick when they really happen (the console keeps
 watching after a run): press **Replay** on a delivery in TC (Settings → API & Webhooks → Webhooks → Deliveries)
