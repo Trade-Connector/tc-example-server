@@ -14,6 +14,10 @@
 //   410  NEVER send this: TC treats 410 Gone as "disable this endpoint" and stops all deliveries.
 //   other non-2xx (500 when the event could not be stored): TC retries after 1 m, 5 m, 30 m,
 //        2 h, 6 h, 12 h and 24 h.
+//   BUT every non-2xx answer (401, 5xx, timeouts, everything) counts towards TC's cutoff: after
+//   50 failed attempts in a row TC disables the endpoint and drops all of its queued deliveries.
+//   So refusing is only safe for short outages; fix the cause promptly, then re-enable the
+//   endpoint and replay deliveries in TC if it was disabled.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Config } from "../config.ts";
@@ -58,8 +62,13 @@ export function createWebhookServer(options: WebhookServerOptions): Server {
     // The one place an unexpected failure (including a failed store write) is answered: 500, so
     // TC retries the delivery later. Never 410.
     handleDelivery(req, res, environment, keys[environment], options).catch((error: Error) => {
+      if (res.headersSent) {
+        // e.g. a 401/400 was already sent and only writing the refusal log failed.
+        log.error("Webhook handler failed after the response was sent", { environment, status: res.statusCode, error: error.message });
+        return;
+      }
       log.error("Webhook handler failed; answered 500 so TC retries", { environment, error: error.message });
-      if (!res.headersSent) sendJson(res, 500, { error: "internal error" });
+      sendJson(res, 500, { error: "internal error" });
     });
   });
 }
@@ -73,7 +82,8 @@ async function handleDelivery(
 ): Promise<void> {
   if (!key) {
     req.resume();
-    // 503, not 410: TC keeps retrying, so nothing is lost once the secret is added.
+    // 503, not 410 (410 disables the endpoint at once). TC retries, but every refusal counts
+    // towards its 50-failures-in-a-row cutoff, so add the secret promptly.
     log.warn("Webhook refused: no secret configured for this path", { environment });
     sendJson(res, 503, { error: `No webhook secret configured for ${environment}` });
     return;

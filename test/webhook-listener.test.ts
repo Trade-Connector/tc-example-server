@@ -115,12 +115,20 @@ describe("webhook listener", () => {
     assert.equal(event.flags.environment_mismatch, true);
   });
 
-  it("has the event on disk by the time it answers 200", async () => {
+  it("has written the event by the time it answers 200", async () => {
     const res = await deliver("/webhooks/tc/sandbox", "evt_durable");
     assert.equal(res.status, 200);
     // No flushJsonWrites(): the 200 itself must mean the write has finished.
     const text = await readFile(path.join(dataDir, "webhook-events.json"), "utf8");
     assert.ok(text.includes('"evt_durable"'));
+  });
+
+  it("answers 400 (not 410) to a correctly signed body that is not JSON", async () => {
+    const body = "this is signed but not JSON";
+    const headers = await tcHeaders({ webhookId: "evt_not_json", body, secret: TEST_SECRET });
+    const res = await send(port, { method: "POST", path: "/webhooks/tc/sandbox", headers, body });
+    statuses.push(res.status);
+    assert.equal(res.status, 400);
   });
 
   it("never answers 410, and never writes the secret to data/", async () => {

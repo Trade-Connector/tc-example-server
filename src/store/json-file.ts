@@ -1,6 +1,8 @@
 // Small helpers for keeping state in JSON files under data/.
 // Writes go to a temporary file first and are then renamed over the real one, so a crash
 // mid-write never leaves a half-written file. Writes to one file are queued, never interleaved.
+// There is no fsync: a finished write survives the process crashing, but not a power cut or an OS
+// crash. That is fine for this example; in production, use a database or queue as the durable step.
 
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";

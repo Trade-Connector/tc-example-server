@@ -130,8 +130,8 @@ export function loadConfig(env: Env = process.env): Config {
   const liveAvailable = liveUnavailableReason === null;
 
   if (!test.apiKey) warnings.push("TC_TEST_API_KEY is not set: sandbox calls will fail until you add a test key.");
-  if (!test.webhookSecret) warnings.push("TC_TEST_WEBHOOK_SECRET is not set: sandbox webhooks will be refused (503).");
-  if (liveAvailable && !live.webhookSecret) warnings.push("TC_LIVE_WEBHOOK_SECRET is not set: live webhooks will be refused (503).");
+  if (!test.webhookSecret) warnings.push("TC_TEST_WEBHOOK_SECRET is not set: sandbox webhooks will be refused (503). Every refusal counts towards TC's 50-failures-in-a-row cutoff, which disables the endpoint: add the secret before TC starts sending.");
+  if (liveAvailable && !live.webhookSecret) warnings.push("TC_LIVE_WEBHOOK_SECRET is not set: live webhooks will be refused (503). Every refusal counts towards TC's 50-failures-in-a-row cutoff, which disables the endpoint: add the secret before TC starts sending.");
 
   // The console is bound to loopback unless CONSOLE_HOST is set explicitly.
   const explicitConsoleHost = clean(env.CONSOLE_HOST);

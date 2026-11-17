@@ -12,6 +12,9 @@
 const STATUSES = ["DRAFT", "OPEN", "OFFERED", "ASSIGNED", "SCHEDULED", "IN_PROGRESS", "WORK_COMPLETE", "PENDING_CUSTOMER_SIG", "PAID", "CANCELLED", "DISPUTED"];
 const EDITABLE = ["DRAFT", "OPEN"];
 const NOT_CANCELLABLE = ["WORK_COMPLETE", "PAID", "CANCELLED", "DISPUTED"];
+// TC does not refuse these yet, but the work is done: cancelling now would cancel finished work for no fee.
+// The console refuses it in live mode and only warns in sandbox (where it is free and harmless).
+const DO_NOT_CANCEL = ["PENDING_CUSTOMER_SIG"];
 const NO_ATTACHMENTS = ["CANCELLED", "PAID"];
 const LIFECYCLE = ["DRAFT", "OPEN", "ASSIGNED", "SCHEDULED", "IN_PROGRESS", "WORK_COMPLETE", "PAID"];
 const SIM_TARGETS = ["OPEN", "ASSIGNED", "SCHEDULED", "IN_PROGRESS", "WORK_COMPLETE", "PAID", "CANCELLED"];
@@ -698,6 +701,7 @@ function fileToBase64(file) {
 /** What TC is likely to charge, from its published rules. TC decides; the response says what it did. */
 function feeEstimate(job) {
   if (job.is_sandbox) return "Sandbox cancellations are always free.";
+  if (DO_NOT_CANCEL.includes(job.status)) return "Do not cancel: the work is done and awaiting the customer's sign-off. TC would currently cancel it with no fee (see the guide).";
   if (["DRAFT", "OPEN", "OFFERED"].includes(job.status) || !job.assigned_installer) return "Expected: no fee (no installer is assigned yet).";
   if (job.status === "IN_PROGRESS") return "Expected: a call-out fee ($250 + GST by default) if the installer has started on site.";
   const target = job.schedule?.scheduled_date ?? job.schedule?.preferred_start_date;
@@ -708,11 +712,16 @@ function feeEstimate(job) {
 }
 
 function cancelCard(job) {
-  const blocked = NOT_CANCELLABLE.includes(job.status);
+  const tcRefuses = NOT_CANCELLABLE.includes(job.status);
+  const doNotCancel = DO_NOT_CANCEL.includes(job.status);
+  const blocked = tcRefuses || (doNotCancel && !job.is_sandbox);
   const reason = h("input", { placeholder: "Reason (optional)", maxlength: "2000" });
   const estimate = feeEstimate(job);
   return h("div", { class: "card" }, h("h3", { text: "Cancel" }),
-    blocked ? h("p", { class: "reason", text: `Disabled: TC refuses to cancel ${job.status} jobs (409 JOB_LOCKED).` }) : null,
+    tcRefuses ? h("p", { class: "reason", text: `Disabled: TC refuses to cancel ${job.status} jobs (409 JOB_LOCKED).` }) : null,
+    doNotCancel ? h("p", { class: "reason", text: job.is_sandbox
+      ? "Warning: this job's work is done and awaiting the customer's sign-off. TC accepts this cancel today, but integrators should not send it (see the guide)."
+      : "Disabled: the work is done and awaiting the customer's sign-off. TC would cancel it with no fee; do not cancel through the API (see the guide)." }) : null,
     h("ul", { class: "fee-rules" },
       h("li", { text: "No fee before an installer is assigned, or while the booked date is 48 hours or more away." }),
       h("li", { text: "$200 + GST inside 48 hours of the booked date." }),
